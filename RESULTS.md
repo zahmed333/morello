@@ -1,8 +1,7 @@
 # Evidence so far
 
 All failures are simulated. Data: NYC yellow taxi trips and NYC EMS dispatch records (real,
-public) and Synthea lab records (synthetic). Code for the experiments is in the earlier
-`bits_v2.zip` bundle.
+public) and Synthea lab records (synthetic). Code for the experiments is in `experiments/`.
 
 ## 1. Controlled experiment on an untouched month (May 2024)
 

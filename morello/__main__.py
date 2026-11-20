@@ -11,10 +11,12 @@ Tables (any SQLAlchemy URL, or duckdb:path/to/file.db):
 
 STATE is a folder or a cloud URL such as s3://bucket/morello.
 `check` and `check-table` exit with code 1 when a batch alerts, so they can gate a pipeline step.
+Reports are coloured when printed to a terminal; --color always|never overrides, and NO_COLOR is respected.
 """
 import argparse, json, sys
 import pandas as pd
 from .monitor import Monitor, _batch_keys
+from . import term
 
 
 def read(path):
@@ -23,17 +25,21 @@ def read(path):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="morello")
+    ap.add_argument("--color", choices=("auto", "always", "never"), default="auto",
+                    help="colour in reports: auto (default, only on a terminal), always, never")
+    shared = argparse.ArgumentParser(add_help=False)      # lets --color also follow the subcommand
+    shared.add_argument("--color", choices=("auto", "always", "never"), default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    f = sub.add_parser("fit", help="learn from a clean history file")
+    f = sub.add_parser("fit", help="learn from a clean history file", parents=[shared])
     f.add_argument("file"); f.add_argument("--batch-col", required=True); f.add_argument("--model", required=True)
     f.add_argument("--freq", default="D", help="period for datetime batch columns: D, h, W ...")
     f.add_argument("--margin", type=float, default=3.0); f.add_argument("--sample-rows", type=int, default=5000)
-    c = sub.add_parser("check", help="check one file; every batch in it is checked in order")
+    c = sub.add_parser("check", help="check one file; every batch in it is checked in order", parents=[shared])
     c.add_argument("file"); c.add_argument("--model", required=True); c.add_argument("--batch", default=None)
     c.add_argument("--json", default=None); c.add_argument("--no-update", action="store_true")
     for name, helptext in (("fit-table", "learn from a table's history"), ("check-table", "check new batches of a table"),
                            ("accept", "mark a reviewed batch as fine")):
-        t = sub.add_parser(name, help=helptext)
+        t = sub.add_parser(name, help=helptext, parents=[shared])
         t.add_argument("--url", required=True); t.add_argument("--table", required=True); t.add_argument("--store", required=True)
         t.add_argument("--key", default=None); t.add_argument("--dialect", default=None)
         if name == "fit-table":
@@ -47,6 +53,7 @@ def main(argv=None):
         else:
             t.add_argument("--batch", required=True)
     a = ap.parse_args(argv)
+    color = term.enabled(a.color)
 
     if a.cmd == "fit":
         mon = Monitor(margin=a.margin, sample_rows=a.sample_rows).fit(read(a.file), a.batch_col, freq=a.freq)
@@ -86,7 +93,7 @@ def main(argv=None):
         if not reports:
             print("no new batches")
     for r in reports:
-        print(r.text())
+        print(r.text(color=color))
     if getattr(a, "json", None):
         json.dump([r.to_dict() for r in reports], open(a.json, "w"), indent=1, default=str)
     return 1 if any(r.alert for r in reports) else 0

@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Morello: know when your data stops making sense</title>
+<meta name="description" content="Morello is a data quality monitor. It learns what normal batches of a table look like and alerts when rows stop making sense together. No rules to write.">
+<meta property="og:title" content="Morello">
+<meta property="og:description" content="Know when your data stops making sense. A data quality monitor that needs no rules.">
+<meta property="og:image" content="assets/social-card.png">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="assets/icon-wine.svg" type="image/svg+xml">
+<link rel="icon" href="assets/favicon-32.png" sizes="32x32">
+<link rel="apple-touch-icon" href="assets/favicon-180.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  @font-face { font-family: "Space Grotesk"; src: url("fonts/SpaceGrotesk-SemiBold.woff2") format("woff2"); font-weight: 600; font-display: swap; }
+
+  /* Tokens from the Morello design system */
+  :root {
+    --ground: #F6F8FC; --surface: #FFFFFF; --tint: #DDE6F7; --ink: #391217; --muted: #4F658B; --line: #B4C3DE;
+    --wine: #391217; --sky: #8DA5CA; --mist: #DDE6F7; --paper: #F6F8FC; --alert: #9E2A33; --ok: #4F658B;
+    --logo-a: var(--wine); --logo-b: var(--sky);
+    --button-bg: var(--wine); --button-ink: var(--paper); --button-hover: #54202A;
+    --font-display: "Space Grotesk", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    --space-1: 4px; --space-2: 8px; --space-4: 16px; --space-6: 24px; --space-10: 40px; --space-16: 64px;
+    --radius-sm: 4px; --radius-md: 12px;
+    --page: 1120px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #24090D; --surface: #391217; --tint: #4A1C22; --ink: #EEF2FA; --muted: #B7C5E0; --line: #6A353C;
+      --alert: #EE9AA2; --ok: #B7C5E0;
+      --logo-a: var(--sky); --logo-b: var(--paper);
+      --button-bg: var(--sky); --button-ink: var(--wine); --button-hover: #A9BCDA;
+    }
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; background: var(--ground); color: var(--ink); font-family: var(--font-sans); font-size: 17px; line-height: 1.6; -webkit-text-size-adjust: 100%; }
+  img, svg { display: block; max-width: 100%; }
+  a { color: inherit; text-underline-offset: 3px; text-decoration-thickness: 1px; }
+  a:hover { text-decoration-thickness: 2px; }
+  :focus-visible { outline: 3px solid var(--muted); outline-offset: 3px; border-radius: var(--radius-sm); }
+  h1, h2, h3 { font-family: var(--font-display); font-weight: 600; letter-spacing: -0.02em; line-height: 1.05; margin: 0; text-wrap: balance; }
+  h2 { font-size: clamp(1.75rem, 1.2rem + 2.2vw, 2.75rem); }
+  h3 { font-size: 1.25rem; letter-spacing: -0.01em; line-height: 1.2; }
+  p { margin: 0; max-width: 65ch; }
+  code, pre, .mono { font-family: var(--font-mono); font-size: 0.86em; }
+  .wrap { width: min(100% - 2 * var(--space-6), var(--page)); margin-inline: auto; }
+  .label { font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+  .skip { position: absolute; left: var(--space-4); top: -100px; background: var(--button-bg); color: var(--button-ink); padding: var(--space-2) var(--space-4); border-radius: var(--radius-sm); z-index: 10; }
+  .skip:focus { top: var(--space-4); }
+
+  /* Header */
+  header .wrap { display: flex; align-items: center; justify-content: space-between; gap: var(--space-6); padding-block: var(--space-6); }
+  .brand { display: inline-flex; align-items: flex-end; gap: 10px; text-decoration: none; min-height: 44px; }
+  .brand { flex: none; }
+  .brand svg { width: 44px; height: 33px; flex: none; }
+  .brand span { font-family: var(--font-display); font-weight: 600; font-size: 30px; line-height: 0.82; letter-spacing: -0.01em; }
+  .arch-a { stroke: var(--logo-a); } .arch-b { stroke: var(--logo-b); }
+  nav ul { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-6); list-style: none; margin: 0; padding: 0; font-size: 15px; }
+  nav a { display: inline-flex; align-items: center; min-height: 44px; text-decoration: none; color: var(--muted); transition: color 150ms ease-out; }
+  nav a:hover { color: var(--ink); text-decoration: underline; }
+
+  /* Hero */
+  .hero { display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 4fr); gap: var(--space-10); align-items: stretch; padding-block: var(--space-10) var(--space-16); }
+  .hero h1 { font-size: clamp(2.6rem, 1.4rem + 5.4vw, 5.25rem); line-height: 0.98; }
+  .hero-text { display: flex; flex-direction: column; gap: var(--space-6); justify-content: center; padding-block: var(--space-6); }
+  .hero-text p { font-size: 1.15rem; color: var(--muted); max-width: 52ch; }
+  .actions { display: flex; flex-wrap: wrap; gap: var(--space-4); align-items: center; }
+  .button { display: inline-flex; align-items: center; min-height: 48px; padding: 0 var(--space-6); border-radius: var(--radius-md); background: var(--button-bg); color: var(--button-ink); font-weight: 600; text-decoration: none; transition: background-color 150ms ease-out, transform 150ms ease-out; }
+  .button:hover { background: var(--button-hover); text-decoration: none; }
+  .button:active { transform: scale(0.98); }
+  .link { display: inline-flex; align-items: center; min-height: 48px; font-weight: 600; }
+  .slab { background: var(--sky); border-radius: var(--radius-md); min-height: 320px; position: relative; overflow: hidden; }
+  .slab svg { position: absolute; left: 50%; bottom: 0; width: 62%; transform: translateX(-50%); }
+  .slab .a { stroke: var(--wine); } .slab .b { stroke: var(--paper); }
+
+  /* Sections */
+  section { padding-block: var(--space-16); }
+  .section-head { display: grid; gap: var(--space-4); margin-bottom: var(--space-10); }
+  .section-head p { color: var(--muted); font-size: 1.1rem; }
+  .band { background: var(--tint); }
+
+  figure { margin: 0; }
+  figcaption { margin-top: var(--space-4); color: var(--muted); font-size: 15px; max-width: 75ch; }
+  .terminal { border-radius: var(--radius-md); overflow-x: auto; background: #24090D; }
+  .terminal img { width: 100%; height: auto; min-width: 760px; aspect-ratio: 967 / 446; }
+  @media (prefers-color-scheme: dark) { .terminal { outline: 1px solid var(--line); } }
+
+  /* Example table */
+  .split { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: var(--space-10); align-items: start; }
+  .split > div { display: grid; gap: var(--space-4); }
+  .scroll { overflow-x: auto; border-radius: var(--radius-md); background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: 15px; }
+  th, td { padding: 12px 14px; text-align: left; white-space: nowrap; }
+  th { font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--line); }
+  td { border-bottom: 1px solid color-mix(in oklab, var(--line) 45%, transparent); }
+  tr:last-child td { border-bottom: 0; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: 14px; }
+  th.num { font-family: inherit; font-size: 12px; }
+  tr.odd td { background: var(--tint); font-weight: 600; }
+  .status { font-size: 12px; font-weight: 600; letter-spacing: 0.06em; }
+  .status.alert { color: var(--alert); } .status.ok { color: var(--ok); }
+  .note { font-size: 15px; color: var(--muted); }
+
+  /* Steps */
+  .steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-10); list-style: none; margin: 0; padding: 0; counter-reset: step; }
+  .steps li { display: grid; gap: var(--space-2); align-content: start; counter-increment: step; }
+  .steps li::before { content: counter(step); font-family: var(--font-display); font-weight: 600; font-size: 3.5rem; line-height: 1; color: var(--sky); }
+  .steps p { color: var(--muted); font-size: 16px; }
+
+  /* Code */
+  .codes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-6); }
+  .code { display: grid; gap: var(--space-2); align-content: start; min-width: 0; }
+  .code.wide { grid-column: 1 / -1; }
+  pre { margin: 0; padding: var(--space-6); border-radius: var(--radius-md); background: #24090D; color: #EEF2FA; overflow-x: auto; line-height: 1.6; font-size: 14px; }
+  pre .c { color: #B7C5E0; } pre .k { color: #8DA5CA; }
+  @media (prefers-color-scheme: dark) { pre { outline: 1px solid var(--line); } }
+
+  /* Evidence */
+  .stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-6); margin-bottom: var(--space-10); }
+  .stat { background: var(--surface); border-radius: var(--radius-md); padding: var(--space-6); display: grid; gap: var(--space-2); align-content: start; }
+  .stat b { font-family: var(--font-display); font-weight: 600; font-size: clamp(2.4rem, 1.6rem + 2.6vw, 3.5rem); line-height: 1; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .stat span { color: var(--muted); font-size: 15px; }
+  .limits { display: grid; gap: var(--space-2); padding: 0; margin: var(--space-6) 0 0; list-style: none; color: var(--muted); max-width: 70ch; }
+  .limits li { padding-left: var(--space-6); position: relative; }
+  .limits li::before { content: ""; position: absolute; left: 0; top: 0.55em; width: 12px; height: 8px; border: 3px solid var(--sky); border-bottom: 0; border-radius: 8px 8px 0 0; }
+
+  footer { border-top: 1px solid var(--line); padding-block: var(--space-10); color: var(--muted); font-size: 15px; }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: var(--space-4) var(--space-10); justify-content: space-between; }
+
+  @media (max-width: 860px) {
+    .hero, .split { grid-template-columns: 1fr; }
+    .slab { min-height: 200px; order: -1; }
+    .slab svg { width: 38%; }
+    .steps, .stats, .codes { grid-template-columns: 1fr; }
+    .steps { gap: var(--space-6); }
+    section { padding-block: var(--space-10); }
+    nav li.optional { display: none; }
+    nav ul { gap: 0 var(--space-4); justify-content: flex-end; }
+  }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .button { transition: none; } }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header>
+  <div class="wrap">
+    <a class="brand" href="#" aria-label="Morello home">
+      <svg viewBox="0 0 51 38" aria-hidden="true" fill="none" stroke-width="9">
+        <path class="arch-a" d="M4.5 38V15a10.5 10.5 0 0 1 21 0v23"/>
+        <path class="arch-b" d="M25.5 38V15a10.5 10.5 0 0 1 21 0v23"/>
+        <path class="arch-a" d="M25.5 38V15"/>
+      </svg>
+      <span>morello</span>
+    </a>
+    <nav aria-label="Sections">
+      <ul>
+        <li class="optional"><a href="#how">How it works</a></li>
+        <li><a href="#start">Quick start</a></li>
+        <li><a href="#evidence">Evidence</a></li>
+        <li class="optional"><a href="#platforms">Where it runs</a></li>
+        <li><a href="https://github.com/zahmed333/morello">GitHub</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+  <div class="wrap hero">
+    <div class="hero-text">
+      <h1>Know when your data stops making sense.</h1>
+      <p>Morello is a data quality monitor for tables that load in batches. It learns what normal rows look like and alerts when the rows of a new batch stop fitting together. You write no rules.</p>
+      <div class="actions">
+        <a class="button" href="#start">Read the quick start</a>
+        <a class="link" href="#evidence">See the evidence</a>
+      </div>
+    </div>
+    <div class="slab" aria-hidden="true">
+      <svg viewBox="0 0 51 60" fill="none" stroke-width="9">
+        <path class="a" d="M4.5 60V15a10.5 10.5 0 0 1 21 0v45"/>
+        <path class="b" d="M25.5 60V15a10.5 10.5 0 0 1 21 0v45"/>
+        <path class="a" d="M25.5 60V15"/>
+      </svg>
+    </div>
+  </div>
+
+  <div class="wrap">
+    <figure>
+      <div class="terminal" tabindex="0" role="group" aria-label="Terminal session, scrollable">
+        <img src="assets/sample-report.svg" width="967" height="446" alt="Terminal session. morello fit trains on 60 clean days of orders. morello check reports the first new day as OK and the second as ALERT, names the column total as suspect, lists eight checks that fired and prints three example rows.">
+      </div>
+      <figcaption>Real output on a synthetic orders table. On the second day, 5% of orders carry another order's product, category and unit price. <code>examples/make_orders.py</code> in the repository reproduces it.</figcaption>
+    </figure>
+  </div>
+
+  <section>
+    <div class="wrap split">
+      <div>
+        <p class="label">What it catches</p>
+        <h2>Rows that pass every column check and are still wrong.</h2>
+        <p>The highlighted order has a real product, a normal price, a normal quantity and a plausible total. A null check, a range check and a distribution check all pass.</p>
+        <p>The total does not match the price and the quantity. Morello learns relationships like this one from the table's history, so it notices when a join starts attaching the wrong record, a unit changes, two columns swap or a code is remapped.</p>
+      </div>
+      <div>
+        <div class="scroll" tabindex="0" role="group" aria-label="Four example orders, scrollable">
+          <table>
+            <thead><tr><th>order</th><th>product</th><th class="num">unit price</th><th class="num">qty</th><th class="num">total</th><th>row</th></tr></thead>
+            <tbody>
+              <tr><td class="mono">03-02-4</td><td>P27 toys</td><td class="num">48.76</td><td class="num">4</td><td class="num">195.04</td><td><span class="status ok">OK</span></td></tr>
+              <tr><td class="mono">03-02-5</td><td>P20 books</td><td class="num">26.89</td><td class="num">3</td><td class="num">80.67</td><td><span class="status ok">OK</span></td></tr>
+              <tr><td class="mono">03-02-6</td><td>P06 toys</td><td class="num">12.57</td><td class="num">4</td><td class="num">50.28</td><td><span class="status ok">OK</span></td></tr>
+              <tr class="odd"><td class="mono">03-02-8</td><td>P27 toys</td><td class="num">48.76</td><td class="num">4</td><td class="num">122.20</td><td><span class="status alert">DOES NOT FIT</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="note">Four rows from the demo batch. 48.76 times 4 is 195.04, and the last row says 122.20.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="band" id="how">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="label">How it works</p>
+        <h2>Learn the table, check each batch, name the column.</h2>
+      </div>
+      <ol class="steps">
+        <li><h3>Learn</h3><p>Give Morello a history of the table that you believe is clean, at least 20 batches. It trains a model that predicts each column from the other columns in the row, and it measures how much every check normally moves from batch to batch.</p></li>
+        <li><h3>Check</h3><p>For each new batch it scores a sample of rows and asks how surprising they are given what it learned. It also runs per-column checks for nulls, unexpected values, distribution shift and duplicates.</p></li>
+        <li><h3>Alert</h3><p>A check alerts when it moves more than three times the largest change seen on any earlier clean batch. The report names the suspect columns and prints example rows. A person can accept a batch that turned out fine.</p></li>
+      </ol>
+    </div>
+  </section>
+
+  <section id="start">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="label">Quick start</p>
+        <h2>Install from the repository and point it at a table.</h2>
+        <p>Morello needs Python 3.9 or later. It is not on PyPI yet.</p>
+      </div>
+      <div class="codes">
+        <div class="code">
+          <h3>Install</h3>
+<pre><code>git clone https://github.com/zahmed333/morello
+cd morello
+pip install .</code></pre>
+        </div>
+        <div class="code">
+          <h3>Command line</h3>
+<pre><code>morello fit   orders_history.parquet \
+    --batch-col order_date --model orders.monitor
+morello check orders_today.parquet \
+    --model orders.monitor
+<span class="c"># exit code 1 when a batch alerts</span></code></pre>
+        </div>
+        <div class="code wide">
+          <h3>Python</h3>
+<pre><code><span class="k">import</span> pandas <span class="k">as</span> pd
+<span class="k">from</span> morello <span class="k">import</span> Monitor
+
+history = pd.read_parquet("orders_history.parquet")
+mon = Monitor().fit(history, batch_col="order_date")     <span class="c"># daily batches by default</span>
+
+report = mon.check(pd.read_parquet("orders_today.parquet"))
+print(report.text())
+<span class="k">if</span> report.alert:
+    ...                                                   <span class="c"># stop the pipeline, page someone</span>
+mon.save("orders.monitor")                                <span class="c"># history grows with every clean batch</span></code></pre>
+        </div>
+        <div class="code wide">
+          <h3>A table in a warehouse</h3>
+<pre><code><span class="k">from</span> morello.table <span class="k">import</span> fit_table, check_table
+
+fit_table(conn, "analytics.orders", batch_col="order_ts", store="s3://bucket/morello")
+reports = check_table(conn, "s3://bucket/morello", table="analytics.orders",
+                      results_table="ops.morello_results")
+<span class="c"># the sample is taken by a query inside the warehouse, so table size does not matter</span></code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="band" id="evidence">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="label">Evidence so far</p>
+        <h2>Tested on simulated failures in two real public datasets.</h2>
+        <p>Ten failure types at four severities were injected into every day of May 2024 in NYC taxi trips and NYC EMS dispatch records. That month was not used to design or tune anything.</p>
+      </div>
+      <div class="stats">
+        <div class="stat"><b>77%</b><span>of injected failures detected on taxi data, against 51% for standard per-column checks alone.</span></div>
+        <div class="stat"><b>78%</b><span>detected on EMS dispatch data, against 69% for standard per-column checks alone.</span></div>
+        <div class="stat"><b>3 of 31</b><span>clean days alerted on each dataset. Standard checks alone alerted on 2 of 31.</span></div>
+      </div>
+      <div class="scroll" tabindex="0" role="group" aria-label="Results table, scrollable">
+        <table>
+          <thead><tr><th>data</th><th class="num">standard checks</th><th class="num">row model alone</th><th class="num">both, as shipped</th></tr></thead>
+          <tbody>
+            <tr><td>NYC taxi trips</td><td class="num">0.51</td><td class="num">0.64</td><td class="num">0.77</td></tr>
+            <tr><td>NYC EMS dispatch</td><td class="num">0.69</td><td class="num">0.58</td><td class="num">0.78</td></tr>
+            <tr><td>Wrong-record joins, taxi</td><td class="num">0.06</td><td class="num">1.00</td><td class="num">1.00</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <ul class="limits">
+        <li>Every failure was simulated. Morello has not been tested on real incidents.</li>
+        <li>It has not been compared with commercial tools. NannyML's PCA method, run on the same batches, detected 0.19 on taxi and 0.34 on EMS.</li>
+        <li>It needs volume. On synthetic lab records, a small table with rows clustered by patient, it added almost nothing over standard checks (0.48 against 0.47).</li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="platforms">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="label">Where it runs</p>
+        <h2>What has been run, and what has only been written.</h2>
+      </div>
+      <div class="scroll" tabindex="0" role="group" aria-label="Platform status table, scrollable">
+        <table>
+          <thead><tr><th>piece</th><th>status</th><th>detail</th></tr></thead>
+          <tbody>
+            <tr><td>pandas, parquet files, command line</td><td><span class="status ok">TESTED</span></td><td>unit tests and the demo on this page</td></tr>
+            <tr><td>DuckDB tables</td><td><span class="status ok">TESTED</span></td><td>including 13.8 million raw taxi rows</td></tr>
+            <tr><td>Spark</td><td><span class="status ok">TESTED</span></td><td>local session, with scoring on executors</td></tr>
+            <tr><td>dbt</td><td><span class="status ok">TESTED</span></td><td>dbt-duckdb; the build fails when a batch alerts</td></tr>
+            <tr><td>Snowflake</td><td><span class="status alert">NOT RUN</span></td><td>stored procedure and SQL dialect are written</td></tr>
+            <tr><td>Databricks</td><td><span class="status alert">NOT RUN</span></td><td>same code as the Spark test</td></tr>
+            <tr><td>Airflow, Dagster</td><td><span class="status alert">NOT RUN</span></td><td>operator and asset check are written</td></tr>
+            <tr><td>Scala</td><td><span class="status alert">NO NATIVE API</span></td><td>Scala jobs gate on the results table</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Morello 0.4, pre-release.</span>
+    <span>Fonts: Space Grotesk, Inter and JetBrains Mono, under the SIL Open Font License.</span>
+  </div>
+</footer>
+</body>
+</html>

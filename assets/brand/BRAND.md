@@ -23,9 +23,9 @@ Wine on paper is 15.5:1, wine on sky 6.6:1, paper on wine 15.5:1.
 ## Type
 
 - Display and wordmark: Space Grotesk SemiBold (`fonts/SpaceGrotesk-SemiBold.woff2`).
-- Text: Inter. Code: JetBrains Mono.
+- Text: Inter. Code: JetBrains Mono (`fonts/JetBrainsMono-Regular.ttf`, `fonts/JetBrainsMono-Bold.ttf`).
 
-Space Grotesk and Inter are licensed under the SIL Open Font License 1.1 (`fonts/OFL.txt`). The wordmark
+Space Grotesk, Inter and JetBrains Mono are licensed under the SIL Open Font License 1.1 (`fonts/OFL.txt`). The wordmark
 and the tagline in the banner are those fonts converted to outlines.
 
 ## Files
@@ -39,6 +39,10 @@ and the tagline in the banner are those fonts converted to outlines.
 | `social-card.svg` | link previews and title slides (1280 x 640) |
 | `png/` | raster copies |
 | `build_assets.py` | regenerates every file from the two font files in `fonts/` |
+| `sample-report.svg`, `.png`, `.ansi` | the terminal session in the README, and the text it was drawn from |
+| `terminal.py` | draws any `morello --color always` output as a terminal image |
+| `slides/morello-template.pptx` | slide template: title, section, text with table, steps, stat cards, chart, table, closing |
+| `slides/preview.jpg` | all ten slides at a glance |
 
 ## Rules
 
@@ -50,6 +54,20 @@ and the tagline in the banner are those fonts converted to outlines.
 - Clear space: the width of one arch on every side. Minimum size: mark 16px tall, lockup 20px.
 - In the lockup the mark stands on the wordmark's baseline.
 - Flat colours, no gradients, no shadows.
+
+## Terminal
+
+Reports print in colour on a terminal: `ALERT` bold red, `OK` cyan, `WARMING UP` yellow, column
+names bold, example rows dim. The 16 standard terminal colours are used, so the output follows
+the reader's own theme. Colour only repeats what the words say. In `sample-report.svg` the same
+roles are drawn in brand colours on the dark ground (#24090D).
+
+## Slides
+
+`slides/morello-template.pptx` uses Space Grotesk SemiBold for titles and Arial for text. Install
+`fonts/SpaceGrotesk-SemiBold.ttf` before opening it, or PowerPoint will substitute another font
+for the titles. Titles are left-aligned and state the point of the slide. Light slides carry the
+content; wine slides open a section or close the deck. One arch per row of arches is paper.
 
 ## Name
 

@@ -2,12 +2,36 @@
 
 # Morello
 
-Flags batches of a table whose rows stop making sense together: records joined to the wrong
-record, swapped columns, changed units, remapped codes, lost precision. It also runs basic
+Morello flags batches of a table whose rows stop making sense together: records joined to the
+wrong record, swapped columns, changed units, remapped codes, lost precision. It also runs basic
 per-column checks (nulls, unexpected values, distribution shift, duplicates).
 
 It needs no rules. You give it a history of the table that you believe is clean, and then each
 new batch.
+
+<p><img src="assets/brand/sample-report.svg" alt="Terminal session: morello fit on 60 clean days of orders, then morello check on two new days. The first day is OK. The second day alerts, names the column total as suspect and prints three example rows." width="100%"></p>
+
+The session above is real output on a synthetic orders table. On the second new day, 5% of
+orders carry another order's product, category and unit price. Every column of those rows looks
+normal on its own. Morello alerts because `total` no longer equals `unit_price` times
+`quantity`, names the column, and prints rows to look at. To reproduce it:
+
+    python examples/make_orders.py
+    morello fit   orders_history.parquet --batch-col date --model orders.monitor
+    morello check orders_new.parquet     --model orders.monitor
+
+## Contents
+
+- [Install](#install)
+- [Use from Python](#use-from-python)
+- [Use on a table in a warehouse](#use-on-a-table-in-a-warehouse)
+- [Use from the command line](#use-from-the-command-line)
+- [Where it runs](#where-it-runs)
+- [Evidence so far](#evidence-so-far)
+- [How it works](#how-it-works)
+- [Settings](#settings)
+- [Limits](#limits)
+- [Files](#files)
 
 ## Install
 
@@ -55,14 +79,44 @@ After `pip install .` the same commands are available as `morello fit`, `morello
 
 `check` exits with code 1 when a batch alerts, so it can gate a pipeline step. CSV files work too.
 
-## What a report looks like
+Reports are coloured when they are printed to a terminal: `ALERT` in red, `OK` in cyan, column
+names in bold. The colours only repeat what the words say. `--color never` or the `NO_COLOR`
+environment variable turns them off, and `--color always` keeps them when output is piped.
 
-    batch 2024-03-01: ALERT (3000 rows checked, 30 batches of history)
-      suspect columns: total
-      - surprise | total: 68.03 (usual -3.294), 802.1x the largest change seen before
-      - broken relationship | total: 0.03 (usual 0), 10.0x the largest change seen before
-      example rows for total:
-        total=40.2, country=US, product=P16, category=garden, unit_price=32.95, quantity=3
+## Where it runs
+
+| piece | status |
+|---|---|
+| pandas DataFrames, parquet files, command line | tested |
+| In-warehouse sampling, table runner, results table, per-slice checks | tested on DuckDB, including 13.8 million raw taxi rows |
+| Spark adapter, including scoring on executors | tested on a local Spark session |
+| dbt Python model and `morello_ok` test | tested with dbt-duckdb |
+| Snowflake stored procedure and SQL dialect | written, not run against Snowflake |
+| Databricks | same code as the Spark test, not run on Databricks |
+| dbt on Snowflake, Databricks or BigQuery | same model file, not run on those platforms |
+| Airflow operator, Dagster asset check | written, not run inside those schedulers |
+| Scala | no native API; Scala jobs gate on the results table |
+
+Setup for each platform is in [`INTEGRATIONS.md`](INTEGRATIONS.md).
+
+## Evidence so far
+
+All failures are simulated. Ten failure types at four severities (1%, 5%, 25% and 100% of rows)
+were injected into every day of May 2024, a month that was not used to design or tune anything.
+The table shows the share of injected failures detected, with the number of clean days that
+alerted in brackets.
+
+| data | standard per-column checks | Morello's row model alone | both (what this package runs) |
+|---|---|---|---|
+| NYC taxi trips | 0.51 (2/31) | 0.64 (3/31) | 0.77 (3/31) |
+| NYC EMS dispatch | 0.69 (2/31) | 0.58 (2/31) | 0.78 (3/31) |
+
+Records joined to the wrong record are where the row model matters most. On taxi data it caught
+them on every day at every severity, against 0.06 for standard checks. NannyML's PCA
+reconstruction, run on the same batches, detected 0.19 of failures on taxi and 0.34 on EMS.
+
+Morello has not been tested on real incidents or against commercial tools, and it was weak on a
+table with few rows per batch. The full tables and method are in [`RESULTS.md`](RESULTS.md).
 
 ## How it works
 
@@ -112,11 +166,15 @@ much each check normally moves. Alerts switch on after 14 calibrated batches
     morello/schema.py    column handling
     morello/model.py     the predictive model
     morello/monitor.py   checks, alert rule, reports
+    morello/term.py      colour for terminal output
     morello/sql.py       sampling inside the warehouse
     morello/table.py     fit and check a table; results rows
     morello/state.py     saved format      morello/store.py   folder, cloud or table storage
     morello/integrations/  spark, snowflake, dbt, airflow, dagster
+    examples/demo.py       synthetic orders table with a broken join, from Python
+    examples/make_orders.py  the files for the terminal session at the top of this page
     examples/dbt/          dbt project       examples/scala/      Scala gate on the results table
-    assets/brand/          logo, colours, type (see BRAND.md)
-    examples/demo.py       synthetic orders table with a broken join
-    tests/test_smoke.py    quick end-to-end test
+    experiments/           code and result files behind RESULTS.md
+    assets/brand/          logo, colours, type, slide template (see BRAND.md)
+    docs/                  landing page
+    tests/                 end-to-end, statistics, DuckDB, Spark and colour tests

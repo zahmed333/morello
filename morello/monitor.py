@@ -48,21 +48,25 @@ class Report:
                     alerts=self.alerts, suspect_columns=self.suspects, examples=self.examples,
                     history_batches=self.history_len)
 
-    def text(self):
+    def text(self, color=False):
+        """The report as text. color=True adds terminal colour codes (see morello.term)."""
+        from .term import paint
+        c = lambda t, style: paint(t, style, color)
         seg = f" [{self.segment}]" if self.segment else ""
-        head = f"batch {self.batch}{seg}: {self.status.upper()} ({self.n_rows} rows checked, {self.history_len} batches of history)"
+        word = c(self.status.upper().replace("_", " "), self.status)
+        head = f"batch {self.batch}{seg}: {word} ({self.n_rows} rows checked, {self.history_len} batches of history)"
         if self.status == "warming_up":
             return head + "\n  not enough history yet to alert reliably"
         if not self.alerts:
             return head
-        lines = [head, "  suspect columns: " + ", ".join(self.suspects[:5])]
+        lines = [head, "  suspect columns: " + ", ".join(c(s, "bold") for s in self.suspects[:5])]
         for a in self.alerts[:8]:
-            lines.append(f"  - {a['check']} | {a['column']}: {a['value']:.4g} (usual {a['usual']:.4g}), "
-                         f"{a['ratio']:.1f}x the largest change seen before")
+            lines.append(f"  - {a['check']} | {c(a['column'], 'bold')}: {a['value']:.4g} (usual {a['usual']:.4g}), "
+                         f"{c('%.1fx' % a['ratio'], 'bold')} the largest change seen before")
         for col, rows in self.examples.items():
-            lines.append(f"  example rows for {col}:")
+            lines.append(f"  example rows for {c(col, 'bold')}:")
             for r in rows:
-                lines.append("    " + ", ".join(f"{k}={v}" for k, v in r.items()))
+                lines.append(c("    " + ", ".join(f"{k}={v}" for k, v in r.items()), "dim"))
         return "\n".join(lines)
 
 

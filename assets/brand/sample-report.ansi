@@ -1,0 +1,19 @@
+$ morello fit orders_history.parquet --batch-col date --model orders.monitor
+trained on 8 columns, 30 calibration batches
+skipped columns: order_id (identifier or free text)
+$ morello check orders_new.parquet --model orders.monitor
+batch 2024-03-01: [36mOK[0m (3000 rows checked, 30 batches of history)
+batch 2024-03-02: [1;31mALERT[0m (3000 rows checked, 31 batches of history)
+  suspect columns: [1mtotal[0m
+  - surprise | [1mtotal[0m: 171.8 (usual -2.726), [1m1993.5x[0m the largest change seen before
+  - extreme values | [1m<whole row>[0m: 0.04567 (usual 0), [1m45.7x[0m the largest change seen before
+  - extreme values | [1mtotal[0m: 0.04567 (usual 0), [1m45.7x[0m the largest change seen before
+  - broken relationship | [1m<whole row>[0m: 0.03633 (usual 0), [1m36.3x[0m the largest change seen before
+  - broken relationship | [1mtotal[0m: 0.03633 (usual 0), [1m36.3x[0m the largest change seen before
+  - rows contradicting their own columns (> 0 bits) | [1m<whole row>[0m: 0.02867 (usual 0), [1m28.7x[0m the largest change seen before
+  - broken relationship (strong) | [1m<whole row>[0m: 0.004667 (usual 0), [1m4.7x[0m the largest change seen before
+  - broken relationship (strong) | [1mtotal[0m: 0.004667 (usual 0), [1m4.7x[0m the largest change seen before
+  example rows for [1mtotal[0m:
+[2m    total=49.59, date=2024-03-02, country=JP, currency=JPY, product=P14, category=kitchen, unit_price=53.09, quantity=3[0m
+[2m    total=26.8, date=2024-03-02, country=US, currency=USD, product=P08, category=toys, unit_price=52.83, quantity=2[0m
+[2m    total=52.16, date=2024-03-02, country=DE, currency=EUR, product=P14, category=kitchen, unit_price=53.09, quantity=2[0m
