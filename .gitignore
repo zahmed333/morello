@@ -1,0 +1,17 @@
+*.egg-info/
+*.monitor
+*.pkl
+*.py[cod]
+.venv/
+__pycache__/
+build/
+data/
+dist/
+out/
+spark-warehouse/
+metastore_db/
+derby.log
+target/
+logs/
+*.duckdb
+.pytest_cache/

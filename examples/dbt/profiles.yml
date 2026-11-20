@@ -1,0 +1,7 @@
+# Local demo profile (dbt-duckdb). On Snowflake or Databricks use your normal profile.
+morello_demo:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "demo.duckdb"

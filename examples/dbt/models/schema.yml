@@ -1,0 +1,6 @@
+version: 2
+models:
+  - name: orders_quality
+    description: "One row per batch of `orders` checked in this run. status is ok, alert, warming_up or trained."
+    tests:
+      - morello_ok

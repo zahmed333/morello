@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "morello"
+version = "0.3.0"
+description = "Flag batches of a table whose rows stop making sense together"
+requires-python = ">=3.9"
+dependencies = ["numpy", "pandas", "lightgbm", "pyarrow"]
+
+[project.scripts]
+morello = "morello.__main__:main"
+
+[project.optional-dependencies]
+duckdb = ["duckdb"]
+sql = ["sqlalchemy"]
+cloud = ["fsspec"]
+spark = ["pyspark"]
+dev = ["pytest", "duckdb", "pyspark", "dbt-core", "dbt-duckdb"]
+
+[tool.setuptools]
+packages = ["morello", "morello.integrations"]

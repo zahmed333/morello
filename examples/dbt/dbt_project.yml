@@ -1,0 +1,7 @@
+name: morello_demo
+version: "1.0"
+profile: morello_demo
+model-paths: ["models"]
+macro-paths: ["macros"]
+vars:
+  orders_path: "data/orders.parquet"
