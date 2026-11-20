@@ -1,4 +1,4 @@
-Sora: Copyright 2019 The Sora Project Authors (https://github.com/sora-xor/sora-font)
+Space Grotesk: Copyright 2020 The Space Grotesk Project Authors (https://github.com/floriankarsten/space-grotesk)
 Inter: Copyright 2016 The Inter Project Authors (https://github.com/rsms/inter)
 
 This Font Software is licensed under the SIL Open Font License, Version 1.1.

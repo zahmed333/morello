@@ -1,4 +1,4 @@
-"""Regenerates every Morello brand file from the two font files (Sora SemiBold, Inter Medium).
+"""Regenerates every Morello brand file from the two font files (Space Grotesk SemiBold, Inter Medium).
 Text is converted to outlines, so the SVGs need no fonts installed.
 Needs: fonttools, uharfbuzz; cairosvg for the PNG copies."""
 import os
@@ -8,8 +8,11 @@ from fontTools.pens.svgPathPen import SVGPathPen
 from fontTools.pens.transformPen import TransformPen
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SRC = f"{HERE}/fonts"
+SRC = os.environ.get("MORELLO_FONTS", f"{HERE}/fonts")
+OUT = os.environ.get("MORELLO_OUT", HERE)
+os.makedirs(f"{OUT}/png", exist_ok=True)
 WINE, SKY, MIST, PAPER, SKY_DEEP = "#391217", "#8DA5CA", "#DDE6F7", "#F6F8FC", "#4F658B"
+TAG = "Know when your data stops making sense."
 
 
 class Face:
@@ -33,13 +36,12 @@ def g(body, x=0.0, y=0.0, s=1.0):
     return f'<g transform="translate({x:.2f} {y:.2f}) scale({s:.4f})">{body}</g>'
 
 
-def mark_pair(a, b, stem):
-    """Two cherries on one stalk. They should match and one does not."""
-    return (f'<path d="M36 9C30 18 22 24 19 33M36 9c2 10 6 18 10 25" fill="none" stroke="{stem}" stroke-width="3.6" stroke-linecap="round"/>'
-            f'<path d="M36 9c6-6 14-6 19-3-4 6-12 8-19 3Z" fill="{stem}"/>'
-            f'<circle cx="18" cy="45" r="13" fill="{a}"/><circle cx="47" cy="46" r="13" fill="{b}"/>')
-
-
+def mark(a, b, leg=23.0):
+    """A lowercase m: two arches side by side on three stems. The first arch and the middle stem
+    are one colour; the second arch is the odd one. Box: x 0..51, y 0..(15 + leg), stroke 9."""
+    y0 = 15.0; y1 = y0 + leg
+    arch = lambda x, c: f'<path d="M{x} {y1:g}V{y0:g}a10.5 10.5 0 0 1 21 0V{y1:g}" fill="none" stroke="{c}" stroke-width="9"/>'
+    return arch(4.5, a) + arch(25.5, b) + f'<path d="M25.5 {y1:g}V{y0:g}" fill="none" stroke="{a}" stroke-width="9"/>'
 
 
 def svg(w, h, body, bg=None, label="Morello"):
@@ -48,47 +50,44 @@ def svg(w, h, body, bg=None, label="Morello"):
             f'role="img" aria-label="{label}">{rect}{body}</svg>\n')
 
 
-OUT = HERE; os.makedirs(f"{OUT}/png", exist_ok=True)
-sora, inter = Face("Sora-SemiBold"), Face("Inter-Medium")
-TAG = "Know when your data stops making sense."
-
-
 def write(name, s):
     open(f"{OUT}/{name}", "w").write(s)
 
 
-# mark alone: light grounds get wine + sky, dark grounds get sky + paper
-for tag, a, b, stem in (("wine", WINE, SKY, WINE), ("sky", SKY, PAPER, SKY)):
-    write(f"mark-{tag}.svg", svg(64, 64, g(mark_pair(a, b, stem), -0.5, 1.5)))
-# app icon and favicon: the mark on a solid tile
-write("icon-wine.svg", svg(64, 64, f'<rect width="64" height="64" rx="14" fill="{WINE}"/>' + g(mark_pair(SKY, PAPER, SKY), 8.6, 9.6, 0.72)))
-write("icon-sky.svg", svg(64, 64, f'<rect width="64" height="64" rx="14" fill="{SKY}"/>' + g(mark_pair(WINE, PAPER, WINE), 8.6, 9.6, 0.72)))
+grotesk, inter = Face("SpaceGrotesk-SemiBold"), Face("Inter-Medium")
 
-# lockup and wordmark
-d, tw = sora.text("morello", 40, 0, 0, tracking=-0.6)
+# mark alone, centred in a 64 box: light grounds get wine + sky, dark grounds get sky + paper
+for tag, a, b in (("wine", WINE, SKY), ("sky", SKY, PAPER)):
+    write(f"mark-{tag}.svg", svg(64, 64, g(mark(a, b), 6.5, 13)))
+# app icon and favicon: the mark on a solid tile
+write("icon-wine.svg", svg(64, 64, f'<rect width="64" height="64" rx="14" fill="{WINE}"/>' + g(mark(SKY, PAPER), 11.6, 16.8, 0.8)))
+write("icon-sky.svg", svg(64, 64, f'<rect width="64" height="64" rx="14" fill="{SKY}"/>' + g(mark(WINE, PAPER), 11.6, 16.8, 0.8)))
+
+# lockup: the mark stands on the wordmark's baseline
+d, tw = grotesk.text("morello", 42, 0, 0, tracking=-0.5)
+BASE = 49.0
 for tag, a, b, ink in (("wine", WINE, SKY, WINE), ("sky", SKY, PAPER, SKY)):
-    body = g(mark_pair(a, b, ink), 0, 1.5) + f'<path fill="{ink}" transform="translate(76 47.5)" d="{d}"/>'
-    write(f"logo-{tag}.svg", svg(76 + tw + 4, 64, body))
+    body = g(mark(a, b), 2, BASE - 38) + f'<path fill="{ink}" transform="translate(69 {BASE:g})" d="{d}"/>'
+    write(f"logo-{tag}.svg", svg(69 + tw + 4, 64, body))
     write(f"wordmark-{tag}.svg", svg(tw + 4, 48, f'<path fill="{ink}" transform="translate(2 37)" d="{d}"/>'))
 
 
 def scene(w, h, big, tag_size, pad):
-    """Mist ground, a sky slab on the right. A stalk comes in from the top edge of the slab and
-    carries two cherries: one wine, one paper."""
-    sw = h * 0.78; sx = w - sw; k = h / 78.0
+    """Mist ground, a sky slab on the right. The m stands on the bottom edge of the slab and its
+    stems run off the frame: one wine arch, one paper arch."""
+    sw = h * 0.78; sx = w - sw; k = sw * 0.62 / 51.0
+    top = h * 0.36
+    big_m = g(mark(WINE, PAPER, leg=(h - top) / k), sx + (sw - 51 * k) / 2, top, k)
     slab = f'<rect x="{sx:.1f}" y="0" width="{sw:.1f}" height="{h}" fill="{SKY}"/>'
-    pair = mark_pair(WINE, PAPER, WINE).replace("M36 9C30 18", "M36 -8C31 10").replace("M36 9c2 10 6 18 10 25", "M36 -8c1 16 5 30 10 42")
-    pair = pair.split('<path d="M36 9c6-6')[0] + pair[pair.index("<circle"):]          # no leaf: the stalk leaves the frame
-    fruit = g(pair, sx + sw / 2 - 32.5 * k, h * 0.5 - 30 * k, k)
-    nd, _ = sora.text("morello", big, 0, 0, tracking=-big * 0.02)
+    nd, _ = grotesk.text("morello", big, 0, 0, tracking=-big * 0.015)
     td, _ = inter.text(TAG, tag_size, 0, 0)
     words = (f'<path fill="{WINE}" transform="translate({pad} {h - pad - tag_size * 2.0:.1f})" d="{nd}"/>'
              f'<path fill="{SKY_DEEP}" transform="translate({pad + big * 0.04:.1f} {h - pad:.1f})" d="{td}"/>')
-    return svg(w, h, slab + fruit + words, bg=MIST, label=f"Morello. {TAG}")
+    return svg(w, h, slab + big_m + words, bg=MIST, label=f"Morello. {TAG}")
 
 
-write("social-card.svg", scene(1280, 640, 136, 30, 72))
-write("banner.svg", scene(1280, 320, 88, 22, 44))
+write("social-card.svg", scene(1280, 640, 140, 30, 72))
+write("banner.svg", scene(1280, 320, 90, 22, 44))
 
 try:
     import cairosvg
@@ -99,4 +98,4 @@ try:
         cairosvg.svg2png(url=f"{OUT}/icon-wine.svg", write_to=f"{OUT}/png/favicon-{sz}.png", output_width=sz)
 except ImportError:
     print("cairosvg not installed: SVGs written, PNG copies skipped")
-print(sorted(os.listdir(OUT)), "wordmark width %.1f" % tw)
+print("built; wordmark width %.1f" % tw)
