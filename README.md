@@ -176,5 +176,6 @@ much each check normally moves. Alerts switch on after 14 calibrated batches
     examples/dbt/          dbt project       examples/scala/      Scala gate on the results table
     experiments/           code and result files behind RESULTS.md
     assets/brand/          logo, colours, type, slide template (see BRAND.md)
-    docs/                  landing page
+    docs/                  landing page, published at zulnoraina.com/morello/
+    wrangler.jsonc         Cloudflare settings that publish docs/
     tests/                 end-to-end, statistics, DuckDB, Spark and colour tests

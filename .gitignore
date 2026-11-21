@@ -17,3 +17,5 @@ logs/
 .pytest_cache/
 orders_history.parquet
 orders_new.parquet
+public/
+.wrangler/

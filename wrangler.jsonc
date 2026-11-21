@@ -1,0 +1,14 @@
+// Publishes the landing page in docs/ at zulnoraina.com/morello/ as a Cloudflare Worker with static files.
+// Cloudflare runs the build command, then `npx wrangler deploy`, on every push to main.
+{
+  "name": "morello-site",
+  "compatibility_date": "2026-06-01",
+  "build": { "command": "rm -rf public && mkdir -p public && cp -r docs public/morello" },
+  "assets": { "directory": "./public" },
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    { "pattern": "zulnoraina.com/morello*", "zone_name": "zulnoraina.com" },
+    { "pattern": "www.zulnoraina.com/morello*", "zone_name": "zulnoraina.com" }
+  ]
+}

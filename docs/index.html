@@ -7,7 +7,9 @@
 <meta name="description" content="Morello is a data quality monitor. It learns what normal batches of a table look like and alerts when rows stop making sense together. No rules to write.">
 <meta property="og:title" content="Morello">
 <meta property="og:description" content="Know when your data stops making sense. A data quality monitor that needs no rules.">
-<meta property="og:image" content="assets/social-card.png">
+<meta property="og:image" content="https://zulnoraina.com/morello/assets/social-card.png">
+<meta property="og:url" content="https://zulnoraina.com/morello/">
+<link rel="canonical" href="https://zulnoraina.com/morello/">
 <meta property="og:type" content="website">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="assets/icon-wine.svg" type="image/svg+xml">
@@ -155,7 +157,7 @@
 
 <header>
   <div class="wrap">
-    <a class="brand" href="#" aria-label="Morello home">
+    <a class="brand" href="./" aria-label="Morello home">
       <svg viewBox="0 0 51 38" aria-hidden="true" fill="none" stroke-width="9">
         <path class="arch-a" d="M4.5 38V15a10.5 10.5 0 0 1 21 0v23"/>
         <path class="arch-b" d="M25.5 38V15a10.5 10.5 0 0 1 21 0v23"/>
@@ -166,10 +168,9 @@
     <nav aria-label="Sections">
       <ul>
         <li class="optional"><a href="#how">How it works</a></li>
-        <li><a href="#start">Quick start</a></li>
+        <li><a href="#start">Usage</a></li>
         <li><a href="#evidence">Evidence</a></li>
         <li class="optional"><a href="#platforms">Where it runs</a></li>
-        <li><a href="https://github.com/zahmed333/morello">GitHub</a></li>
       </ul>
     </nav>
   </div>
@@ -181,7 +182,7 @@
       <h1>Know when your data stops making sense.</h1>
       <p>Morello is a data quality monitor for tables that load in batches. It learns what normal rows look like and alerts when the rows of a new batch stop fitting together. You write no rules.</p>
       <div class="actions">
-        <a class="button" href="#start">Read the quick start</a>
+        <a class="button" href="#start">See how it is used</a>
         <a class="link" href="#evidence">See the evidence</a>
       </div>
     </div>
@@ -199,7 +200,7 @@
       <div class="terminal" tabindex="0" role="group" aria-label="Terminal session, scrollable">
         <img src="assets/sample-report.svg" width="967" height="446" alt="Terminal session. morello fit trains on 60 clean days of orders. morello check reports the first new day as OK and the second as ALERT, names the column total as suspect, lists eight checks that fired and prints three example rows.">
       </div>
-      <figcaption>Real output on a synthetic orders table. On the second day, 5% of orders carry another order's product, category and unit price. <code>examples/make_orders.py</code> in the repository reproduces it.</figcaption>
+      <figcaption>Real output on a synthetic orders table. On the second day, 5% of orders carry another order's product, category and unit price. A script in the repository reproduces it.</figcaption>
     </figure>
   </div>
 
@@ -245,24 +246,15 @@
   <section id="start">
     <div class="wrap">
       <div class="section-head">
-        <p class="label">Quick start</p>
-        <h2>Install from the repository and point it at a table.</h2>
-        <p>Morello needs Python 3.9 or later. It is not on PyPI yet.</p>
+        <p class="label">Usage</p>
+        <h2>Point it at a table from the command line, Python or a warehouse.</h2>
+        <p>Morello is in private pre-release, so the repository is not public yet. This is what using it looks like.</p>
       </div>
       <div class="codes">
-        <div class="code">
-          <h3>Install</h3>
-<pre><code>git clone https://github.com/zahmed333/morello
-cd morello
-pip install .</code></pre>
-        </div>
-        <div class="code">
+        <div class="code wide">
           <h3>Command line</h3>
-<pre><code>morello fit   orders_history.parquet \
-    --batch-col order_date --model orders.monitor
-morello check orders_today.parquet \
-    --model orders.monitor
-<span class="c"># exit code 1 when a batch alerts</span></code></pre>
+<pre><code>morello fit   orders_history.parquet --batch-col order_date --model orders.monitor
+morello check orders_today.parquet   --model orders.monitor      <span class="c"># exit code 1 when a batch alerts</span></code></pre>
         </div>
         <div class="code wide">
           <h3>Python</h3>
@@ -348,7 +340,7 @@ reports = check_table(conn, "s3://bucket/morello", table="analytics.orders",
 
 <footer>
   <div class="wrap">
-    <span>Morello 0.4, pre-release.</span>
+    <span>Morello 0.4, private pre-release. <a href="https://zulnoraina.com/">zulnoraina.com</a></span>
     <span>Fonts: Space Grotesk, Inter and JetBrains Mono, under the SIL Open Font License.</span>
   </div>
 </footer>
