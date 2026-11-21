@@ -57,7 +57,7 @@ def test_where_filter_and_slices(source):
 
     sampler = TableSampler(source, "orders", "order_ts")
     counts = sampler.batch_counts("region")
-    per_region = dict(zip(counts["slice"], counts["n_rows"]))
+    per_region = dict(zip(counts["slice"], counts["n_rows"], strict=True))
     samples = sampler.sample_slices("2024-01-01", "region", {"US": per_region["US"]}, want_rows=20)
     assert set(samples) == {"US"}
     assert len(samples["US"]) == 20 and set(samples["US"]["region"]) == {"US"}

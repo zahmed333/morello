@@ -37,7 +37,7 @@ normal on its own. Morello alerts because `total` no longer equals `unit_price` 
 
 ## Install
 
-    pip install .            # from this folder; needs Python 3.9+, numpy, pandas, lightgbm, pyarrow
+    pip install .            # from this folder; needs Python 3.10+, numpy, pandas, lightgbm, pyarrow
 
 ## Use from Python
 

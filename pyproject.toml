@@ -7,7 +7,7 @@ name = "morello"
 version = "0.5.0"
 description = "Flag batches of a table whose rows stop making sense together"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = ["numpy", "pandas>=2.0", "lightgbm>=4.0", "pyarrow"]
 
 [project.scripts]
@@ -29,7 +29,7 @@ filterwarnings = ["ignore::DeprecationWarning", "ignore::FutureWarning", "ignore
 
 [tool.ruff]
 line-length = 100
-target-version = "py39"
+target-version = "py310"
 extend-exclude = ["research"]  # the experiment scripts behind docs/results.md, kept as they were run
 
 [tool.ruff.lint]

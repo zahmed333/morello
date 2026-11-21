@@ -86,7 +86,7 @@ class ColumnCoder:
         self.other_class = len(top) + 1
         self.other_cost = {
             float(value): float(-np.log2(count / rare_total))
-            for value, count in zip(rare, rare_counts)
+            for value, count in zip(rare, rare_counts, strict=True)
         }
         self.n_classes = len(top) + 2
         return self

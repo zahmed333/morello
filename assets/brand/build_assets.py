@@ -33,7 +33,7 @@ class Face:
         hb.shape(self.hb, buf)
         k = size / self.upm
         pen_x, parts = x, []
-        for info, pos in zip(buf.glyph_infos, buf.glyph_positions):
+        for info, pos in zip(buf.glyph_infos, buf.glyph_positions, strict=True):
             name = self.tt.getGlyphName(info.codepoint)
             p = SVGPathPen(self.gs, ntos=lambda v: f"{v:.2f}".rstrip("0").rstrip("."))
             self.gs[name].draw(

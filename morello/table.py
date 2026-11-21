@@ -115,7 +115,7 @@ def fit_table(
     if until is not None:
         counts = counts[counts["batch"] <= str(until)]
     batches = list(counts["batch"])
-    n_rows = dict(zip(counts["batch"], counts["n_rows"]))
+    n_rows = dict(zip(counts["batch"], counts["n_rows"], strict=True))
     if len(batches) < MIN_FIT_BATCHES:
         raise ValueError(
             f"need at least {MIN_FIT_BATCHES} batches of history to calibrate alerts, "
@@ -183,7 +183,7 @@ def check_table(
     one_batch = batch is not None
     since = str(batch) if one_batch else monitor.last_checked
     counts = sampler.batch_counts(since=since)
-    n_rows = dict(zip(counts["batch"], counts["n_rows"]))
+    n_rows = dict(zip(counts["batch"], counts["n_rows"], strict=True))
     if one_batch:
         pending = [str(batch)] if str(batch) in n_rows else []
     else:
@@ -290,7 +290,9 @@ def _slice_counts(sampler: TableSampler, config: TableConfig, since: str | None)
         return {}
     counts = sampler.batch_counts(config.slice_col, since=since)
     by_batch: SliceCounts = {}
-    for batch, value, n_rows in zip(counts["batch"], counts["slice"], counts["n_rows"]):
+    for batch, value, n_rows in zip(
+        counts["batch"], counts["slice"], counts["n_rows"], strict=True
+    ):
         if value in config.slices:
             by_batch.setdefault(batch, {})[value] = int(n_rows)
     return by_batch
