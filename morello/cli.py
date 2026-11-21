@@ -4,11 +4,21 @@ Files:
   morello fit   history.parquet --batch-col date --model STATE
   morello check today.parquet   --model STATE [--batch 2024-05-03] [--json report.json]
 
+Before fitting:
+  morello init     history.parquet                 which column defines the batches
+  morello backtest history.parquet --batch-col date    which past batches would have alerted
+Both also take --url URL --table NAME in place of a file.
+
 Tables (any SQLAlchemy URL, or duckdb:path/to/file.db):
   morello fit-table   --url URL --table analytics.orders --batch-col order_ts --store STATE
   morello check-table --url URL --table analytics.orders --store STATE \\
                       --results-table ops.morello_results
   morello accept      --url URL --table analytics.orders --store STATE --batch 2024-05-03
+  morello refit-table --url URL --table analytics.orders --store STATE
+  morello check-reference --url URL --child orders.customer_id --parent customers.id \\
+                      --batch-col order_ts
+  morello page        --url URL --table analytics.orders --store STATE \\
+                      --results-table ops.morello_results --out orders.html
 
 STATE is a folder or a cloud URL such as s3://bucket/morello.
 
@@ -16,6 +26,12 @@ Exit codes: 0 no alert, 1 at least one batch alerted, 2 the command could not ru
 `check-table` can therefore gate a pipeline step. `check-table` keeps exiting with 1 after an
 alert, also when there is nothing new to check, until the batch is accepted or passes a re-check
 (`check-table --batch ...`).
+
+`check-table --slack-webhook URL` and `--email-to a@x.org,b@x.org` send the alerts to people.
+The webhook can also come from MORELLO_SLACK_WEBHOOK. Email uses MORELLO_SMTP_HOST, _PORT, _USER,
+_PASSWORD and MORELLO_EMAIL_FROM.
+
+--details lists every check behind the findings.
 
 Reports are coloured when printed to a terminal. --color always|never overrides, and NO_COLOR
 is respected. -v prints progress to stderr.
@@ -26,15 +42,28 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 
 import pandas as pd
 
 from . import term
+from .backtest import backtest, backtest_table
 from .monitor import Monitor, batch_keys
+from .notify import notify
+from .page import write_page
+from .profile import profile_frame, profile_table
+from .references import check_reference
 from .report import Report
 from .state import StateError
-from .table import accept_batch, alert_summary, check_table, fit_table, unresolved_alerts
+from .table import (
+    accept_batch,
+    alert_summary,
+    check_table,
+    fit_table,
+    refit_table,
+    unresolved_alerts,
+)
 
 EXIT_OK, EXIT_ALERT, EXIT_ERROR = 0, 1, 2
 COLOR_CHOICES = ("auto", "always", "never")
@@ -96,6 +125,9 @@ def build_parser() -> argparse.ArgumentParser:
     fit_table_.add_argument("--where", help="SQL filter, inserted as written")
     fit_table_.add_argument("--until", help="only use batches up to this key")
     fit_table_.add_argument("--slice-col", help="also check each large value of this column")
+    fit_table_.add_argument(
+        "--refit-every", type=int, help="fit again after this many checked batches"
+    )
     _add_monitor_settings(fit_table_)
     fit_table_.set_defaults(run=run_fit_table)
 
@@ -105,6 +137,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_table_options(check_table_)
     check_table_.add_argument("--batch", help="check this one batch")
     check_table_.add_argument("--results-table", help="append one row per check to this table")
+    check_table_.add_argument("--slack-webhook", help="post alerts to this Slack webhook")
+    check_table_.add_argument("--email-to", help="email alerts to these addresses, comma separated")
     _add_check_options(check_table_)
     check_table_.set_defaults(run=run_check_table)
 
@@ -113,17 +147,68 @@ def build_parser() -> argparse.ArgumentParser:
     accept.add_argument("--batch", required=True)
     accept.add_argument("--results-table", help="also record the decision in this table")
     accept.set_defaults(run=run_accept)
+    refit = commands.add_parser(
+        "refit-table", parents=[shared], help="train again on the table as it is now"
+    )
+    _add_table_options(refit)
+    refit.set_defaults(run=run_refit_table)
+
+    init = commands.add_parser("init", parents=[shared], help="look at a table before fitting")
+    _add_file_or_table(init)
+    init.set_defaults(run=run_init)
+
+    backtest_ = commands.add_parser(
+        "backtest", parents=[shared], help="replay history: which past batches would have alerted"
+    )
+    _add_file_or_table(backtest_)
+    backtest_.add_argument("--batch-col", required=True)
+    backtest_.add_argument("--fit-batches", type=int, help="batches used to fit (default: half)")
+    backtest_.add_argument("--slice-col", help="tables only: also check each large slice")
+    backtest_.add_argument("--json", help="also write the result to this file")
+    _add_monitor_settings(backtest_)
+    backtest_.set_defaults(run=run_backtest)
+
+    reference = commands.add_parser(
+        "check-reference", parents=[shared], help="check that keys exist in another table"
+    )
+    reference.add_argument("--url", required=True)
+    reference.add_argument("--child", required=True, help="table.column holding the reference")
+    reference.add_argument("--parent", required=True, help="table.column it should match")
+    reference.add_argument("--batch-col", required=True, help="batch column of the child table")
+    reference.add_argument("--batch", help="check this batch (default: the newest)")
+    reference.add_argument("--dialect")
+    reference.add_argument("--json", help="also write the report to this file")
+    reference.set_defaults(run=run_check_reference, details=False)
+
+    page = commands.add_parser("page", parents=[shared], help="write a status page for a table")
+    _add_table_options(page)
+    page.add_argument("--results-table", required=True)
+    page.add_argument("--out", required=True, help="the HTML file to write")
+    page.set_defaults(run=run_page)
     return parser
+
+
+def _add_file_or_table(command: argparse.ArgumentParser) -> None:
+    command.add_argument("file", nargs="?", help="a parquet or CSV file")
+    command.add_argument("--url", help="a database, in place of a file")
+    command.add_argument("--table", help="the table in that database")
+    command.add_argument("--dialect")
 
 
 def _add_monitor_settings(command: argparse.ArgumentParser) -> None:
     command.add_argument("--margin", type=float, default=3.0)
-    command.add_argument("--sample-rows", type=int, default=5000)
+    command.add_argument(
+        "--sample-rows",
+        type=lambda text: text if text == "auto" else int(text),
+        default=5000,
+        help="rows scored per batch, or auto to size it from the table",
+    )
 
 
 def _add_check_options(command: argparse.ArgumentParser) -> None:
     command.add_argument("--json", help="also write the reports to this file")
     command.add_argument("--no-update", action="store_true", help="do not learn from this run")
+    command.add_argument("--details", action="store_true", help="list every check that alerted")
 
 
 def _add_table_options(command: argparse.ArgumentParser) -> None:
@@ -139,9 +224,6 @@ def run_fit(args: argparse.Namespace) -> int:
     monitor.fit(read_table(args.file), args.batch_col, freq=args.freq)
     monitor.save(args.model)
     _print_fit_summary(monitor)
-    if monitor.schema.skipped:
-        skipped = ", ".join(f"{name} ({why})" for name, why in monitor.schema.skipped.items())
-        print("skipped columns:", skipped)
     return EXIT_OK
 
 
@@ -173,6 +255,7 @@ def run_fit_table(args: argparse.Namespace) -> int:
         where=args.where,
         until=args.until,
         slice_col=args.slice_col,
+        refit_every=args.refit_every,
         dialect=args.dialect,
         margin=args.margin,
         sample_rows=args.sample_rows,
@@ -196,10 +279,18 @@ def run_check_table(args: argparse.Namespace) -> int:
     if not reports:
         print("no new batches")
     exit_code = _print_reports(reports, args)
-    earlier = alert_summary([], _still_unresolved(args, reports))
+    still_unresolved = _still_unresolved(args, reports)
+    earlier = alert_summary([], still_unresolved)
     if earlier:
         print(earlier)
-        return EXIT_ALERT
+        exit_code = EXIT_ALERT
+    slack = args.slack_webhook or os.environ.get("MORELLO_SLACK_WEBHOOK")
+    email_to = [address.strip() for address in (args.email_to or "").split(",") if address.strip()]
+    if exit_code == EXIT_ALERT and (slack or email_to):
+        accept = (
+            f"morello accept --url <URL> --table {args.table} --store {args.store} --batch <BATCH>"
+        )
+        notify(args.table, reports, still_unresolved, slack, email_to, accept)
     return exit_code
 
 
@@ -226,6 +317,86 @@ def run_accept(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def run_refit_table(args: argparse.Namespace) -> int:
+    monitor = refit_table(args.url, args.store, args.key, args.table, args.dialect)
+    _print_fit_summary(monitor)
+    return EXIT_OK
+
+
+def run_init(args: argparse.Namespace) -> int:
+    if args.url:
+        profile = profile_table(args.url, _required(args.table, "--table"), args.dialect)
+        target = f"fit-table --url {args.url} --table {args.table}"
+        store = "--store STATE"
+    else:
+        profile = profile_frame(read_table(_required(args.file, "a file or --url")))
+        target, store = f"fit {args.file}", "--model STATE"
+    print(profile.text())
+    best = profile.batch_column
+    if best is not None and profile.ready:
+        not_dates = "" if best.as_date or not args.url else " --not-dates"
+        sample = f" --sample-rows {profile.sample_rows}" if profile.sample_rows != 5000 else ""
+        print(f"next: morello {target} --batch-col {best.column}{not_dates}{sample} {store}")
+    return EXIT_OK if profile.ready else EXIT_ERROR
+
+
+def run_backtest(args: argparse.Namespace) -> int:
+    settings = {"margin": args.margin, "sample_rows": args.sample_rows}
+    if args.url:
+        result = backtest_table(
+            args.url,
+            _required(args.table, "--table"),
+            args.batch_col,
+            fit_batches=args.fit_batches,
+            slice_col=args.slice_col,
+            dialect=args.dialect,
+            **settings,
+        )
+    else:
+        table = read_table(_required(args.file, "a file or --url"))
+        result = backtest(table, args.batch_col, fit_batches=args.fit_batches, **settings)
+    print(result.text(color=term.enabled(args.color)))
+    if args.json:
+        with open(args.json, "w") as file:
+            json.dump(result.to_dict(), file, indent=1, default=str)
+    return EXIT_OK
+
+
+def run_check_reference(args: argparse.Namespace) -> int:
+    child, child_col = _table_and_column(args.child)
+    parent, parent_col = _table_and_column(args.parent)
+    report = check_reference(
+        args.url,
+        child,
+        child_col,
+        parent,
+        parent_col,
+        args.batch_col,
+        batch=args.batch,
+        dialect=args.dialect,
+    )
+    return _print_reports([report], args)
+
+
+def run_page(args: argparse.Namespace) -> int:
+    write_page(args.url, args.store, args.results_table, args.out, args.key, args.table)
+    print(f"wrote {args.out}")
+    return EXIT_OK
+
+
+def _required(value: str | None, name: str) -> str:
+    if not value:
+        raise ValueError(f"give {name}")
+    return value
+
+
+def _table_and_column(text: str) -> tuple[str, str]:
+    table, _, column = text.rpartition(".")
+    if not table or not column:
+        raise ValueError(f"expected table.column, got {text!r}")
+    return table, column
+
+
 def read_table(path: str) -> pd.DataFrame:
     """Read a parquet file, or anything else as CSV."""
     if path.lower().endswith((".parquet", ".pq")):
@@ -235,9 +406,19 @@ def read_table(path: str) -> pd.DataFrame:
 
 def _print_fit_summary(monitor: Monitor, suffix: str = "") -> None:
     print(
-        f"trained on {len(monitor.columns)} columns, "
+        f"trained on {len(monitor.schema.plans)} columns, "
         f"{len(monitor.history)} calibration batches{suffix}"
     )
+    print(
+        f"each batch is checked on up to {monitor.sample_rows} rows; a fault has to touch about "
+        f"{monitor.smallest_detectable_share:.2%} of them to be noticed"
+    )
+    for label, columns in (
+        ("format and length checks only", monitor.schema.format_only),
+        ("skipped columns", monitor.schema.skipped),
+    ):
+        if columns:
+            print(f"{label}:", ", ".join(f"{name} ({why})" for name, why in columns.items()))
     if monitor.batches_until_ready:
         print(
             f"warming up: alerts switch on after {monitor.batches_until_ready} more clean batches"
@@ -247,7 +428,7 @@ def _print_fit_summary(monitor: Monitor, suffix: str = "") -> None:
 def _print_reports(reports: list[Report], args: argparse.Namespace) -> int:
     color = term.enabled(args.color)
     for report in reports:
-        print(report.text(color=color))
+        print(report.text(color=color, details=args.details))
     if args.json:
         with open(args.json, "w") as file:
             json.dump([report.to_dict() for report in reports], file, indent=1, default=str)

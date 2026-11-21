@@ -22,9 +22,10 @@ def test_rows_that_stop_fitting_alert_and_name_the_column(monitor, today):
     assert "ALERT" in report.text()
 
 
-def test_identifier_and_empty_columns_are_skipped(monitor):
-    assert monitor.schema.skipped == {"id": "identifier or free text", "note": "empty"}
-    assert monitor.columns == ["kind", "amount", "flag"]
+def test_identifiers_get_format_checks_and_empty_columns_are_skipped(monitor):
+    assert monitor.schema.format_only == {"id": "identifier or free text"}
+    assert monitor.schema.skipped == {"note": "empty"}
+    assert monitor.columns == ["id__length", "id__known_format", "kind", "amount", "flag"]
 
 
 def test_a_clean_batch_is_learned_and_an_alerting_one_is_not(monitor, today):

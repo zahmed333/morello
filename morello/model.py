@@ -47,6 +47,7 @@ GROUP_MIN_ETA_SQUARED = 0.5
 GROUP_MIN_KEYS, GROUP_MAX_KEYS = 5, 300
 GROUP_MIN_ROWS = 100
 GROUP_MIN_ROWS_PER_KEY = 5
+RELATED_MIN_SHARE = 0.1  # share of a column model's gain that makes a column "related"
 IQR_TO_SIGMA = 1.349  # interquartile range of a normal distribution, in standard deviations
 TRIM_QUANTILES = (0.001, 0.999)  # rows outside these are left out of the linear fit
 
@@ -80,12 +81,16 @@ class GroupFit:
     by_key: dict[float, tuple[float, float]]  # group value -> (median, robust scale)
     overall: tuple[float, float]
 
-    def standardize(self, values: np.ndarray, keys: np.ndarray) -> np.ndarray:
-        median = np.full(len(values), self.overall[0])
-        scale = np.full(len(values), self.overall[1])
+    def median_and_scale(self, keys: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        median = np.full(len(keys), self.overall[0])
+        scale = np.full(len(keys), self.overall[1])
         for key, (key_median, key_scale) in self.by_key.items():
             selected = keys == key
             median[selected], scale[selected] = key_median, key_scale
+        return median, scale
+
+    def standardize(self, values: np.ndarray, keys: np.ndarray) -> np.ndarray:
+        median, scale = self.median_and_scale(keys)
         return np.round((values - median) / scale, 2) + 0.0  # + 0.0 turns -0.0 into 0.0
 
 
@@ -293,6 +298,48 @@ class TableModel:
             variance[:, index] = np.maximum(cost_variance, 0)
             marginal[:, index] = alone + extra_bits
         return Scores(bits, excess, variance, marginal)
+
+    # ------------------------------------------------------------------ explaining a column
+    def related_columns(self, column: str, top: int = 2) -> list[str]:
+        """The earlier columns the model leans on most when it predicts `column`."""
+        index = self.columns.index(column)
+        column_model = self.column_models[index]
+        earlier = self.columns[:index]
+        if column_model.booster is None or not earlier:
+            return []
+        gain = np.asarray(column_model.booster.feature_importance("gain"), dtype=float)
+        per_column = gain[: len(earlier)].copy()
+        if column_model.linear is not None and len(gain) > len(earlier):
+            # The linear prediction is a feature of its own. Credit it to the columns it reads.
+            weights = np.abs(column_model.linear.coefficients[:-1])
+            if weights.sum() > 0:
+                per_column += gain[-1] * weights / weights.sum()
+        if column_model.group is not None:
+            per_column[column_model.group.column_index] += per_column.sum() + 1.0
+        total = per_column.sum()
+        if total <= 0:
+            return []
+        strongest = np.argsort(-per_column)[:top]
+        return [earlier[i] for i in strongest if per_column[i] >= RELATED_MIN_SHARE * total]
+
+    def most_likely(self, table: pd.DataFrame, column: str) -> tuple[np.ndarray, np.ndarray]:
+        """The value the model finds most likely for `column` in each row, and its probability.
+
+        The value is NaN where the most likely class stands for no single value.
+        """
+        index = self.columns.index(column)
+        column_model = self.column_models[index]
+        probabilities = self._predict(table, index)
+        best = probabilities.argmax(1)
+        seen_classes = np.where(column_model.class_map >= 0)[0]
+        values = column_model.coder.class_values()[seen_classes[best]]
+        if column_model.group is not None:
+            keys = self._values(table, column_model.group.column_index)
+            median, scale = column_model.group.median_and_scale(keys)
+            values = median + values * scale
+        elif column_model.code_residual:
+            values = column_model.linear.predict(self._earlier(table, index)) + values
+        return values, probabilities.max(1)
 
     def _predict(self, table: pd.DataFrame, index: int) -> np.ndarray:
         column_model = self.column_models[index]

@@ -28,7 +28,7 @@ from . import state
 from .distributed import distributed_statistics
 from .monitor import MIN_FIT_BATCHES, Monitor, TableConfig
 from .report import Report
-from .sql import Source, TableSampler, connect
+from .sql import Source, TableSampler, connect, literal
 from .store import Store, open_store
 
 log = logging.getLogger(__name__)
@@ -65,7 +65,12 @@ def result_rows(table: str, reports: list[Report]) -> pd.DataFrame:
     rows = []
     for report in reports:
         top = report.alerts[0] if report.alerts else None
-        details = {"alerts": report.to_dict()["alerts"][:10], "examples": report.examples}
+        details = {
+            "findings": [finding.summary for finding in report.findings[:10]],
+            "notes": [_finding_note(finding) for finding in report.findings[:10]],
+            "alerts": report.to_dict()["alerts"][:10],
+            "examples": report.examples,
+        }
         rows.append(
             {
                 "checked_at": checked_at,
@@ -85,6 +90,12 @@ def result_rows(table: str, reports: list[Report]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=RESULT_COLUMNS)
 
 
+def _finding_note(finding: Any) -> str:
+    """Where a finding's rows are and what else it affected, on one line."""
+    affects = f"also affected: {', '.join(finding.affects)}" if finding.affects else ""
+    return "; ".join(part for part in (finding.where, affects) if part)
+
+
 def fit_table(
     source: Any,
     table: str,
@@ -100,6 +111,8 @@ def fit_table(
     slice_sample_rows: int = 2000,
     train_fraction: float = 0.5,
     score_rows: int | None = None,
+    refit_every: int | None = None,
+    exclude_batches: list[str] | tuple[str, ...] = (),
     dialect: str | None = None,
     **monitor_settings: Any,
 ) -> Monitor:
@@ -111,10 +124,16 @@ def fit_table(
     until        only use batches up to and including this key (default: all of them)
     slice_col    also keep a separate alert history for each large value of this column
     score_rows   Spark only: score this many rows per batch on the cluster, not sample_rows
+    refit_every  check_table fits again after this many checked batches (see refit_table)
+    exclude_batches  batches to leave out of training and calibration
     monitor_settings are passed to Monitor (margin, sample_rows and so on)
     """
     source = connect(source, dialect)
     sampler = TableSampler(source, table, batch_col, as_date, where)
+    if exclude_batches:
+        excluded = ", ".join(literal(batch) for batch in exclude_batches)
+        clean_only = f"{sampler.key_expression} NOT IN ({excluded})"
+        sampler.where = f"({where}) AND {clean_only}" if where else clean_only
     counts = sampler.batch_counts()
     if until is not None:
         counts = counts[counts["batch"] <= str(until)]
@@ -129,6 +148,7 @@ def fit_table(
     train_batches, calibration_batches = batches[:n_train], batches[n_train:]
 
     monitor = Monitor(**monitor_settings)
+    monitor.choose_sample_rows(counts["n_rows"])
     train = sampler.sample(
         train_batches[0],
         train_batches[-1],
@@ -146,6 +166,10 @@ def fit_table(
         slices=_large_slices(sampler, slice_col, train_batches, min_slice_rows, max_slices),
         slice_sample_rows=slice_sample_rows,
         score_rows=score_rows,
+        max_slices=max_slices,
+        min_slice_rows=min_slice_rows,
+        train_fraction=train_fraction,
+        refit_every=refit_every,
     )
 
     slice_counts = _slice_counts(sampler, monitor.table_config, since=calibration_batches[0])
@@ -196,6 +220,51 @@ def accept_batch(
     return _run(
         source, store, key, table, batch, results_table, "always", 1, dialect, status=ACCEPTED
     )
+
+
+def refit_table(
+    source: Any,
+    store: str | Store,
+    key: str | None = None,
+    table: str | None = None,
+    dialect: str | None = None,
+) -> Monitor:
+    """Train again on the table as it is now, with the settings of the saved monitor.
+
+    Use it when the table has changed for good: new columns, new categories, a new normal.
+    Batches with an unresolved alert are left out, so a fault that nobody accepted is not
+    learned as normal. They stay unresolved, and checking continues after the last batch
+    already checked.
+    """
+    store = open_store(store)
+    key = _key(key, table)
+    old = Monitor.load(store, key)
+    config = old.table_config
+    if config is None:
+        raise ValueError(f"monitor {key!r} was not fitted with fit_table")
+    monitor = fit_table(
+        source,
+        table or config.table,
+        config.batch_col,
+        store,
+        key,
+        as_date=config.as_date,
+        where=config.where,
+        until=old.last_checked,
+        slice_col=config.slice_col,
+        max_slices=config.max_slices,
+        min_slice_rows=config.min_slice_rows,
+        slice_sample_rows=config.slice_sample_rows,
+        train_fraction=config.train_fraction,
+        score_rows=config.score_rows,
+        refit_every=config.refit_every,
+        exclude_batches=old.unresolved_alerts,
+        dialect=dialect,
+        **{name: getattr(old, name) for name in Monitor.SETTINGS},
+    )
+    monitor.last_checked, monitor.unresolved_alerts = old.last_checked, old.unresolved_alerts
+    monitor.save(store, key, history_only=True)
+    return monitor
 
 
 def unresolved_alerts(
@@ -250,9 +319,13 @@ def _run(
     if config is None:
         raise ValueError(f"monitor {key!r} was not fitted with fit_table")
     table = table or config.table
+    one_batch = batch is not None
+    refit_is_due = config.refit_every and monitor.checked_since_fit >= config.refit_every
+    if refit_is_due and not one_batch and update != "never":
+        log.info("fitting again after %d checked batches", monitor.checked_since_fit)
+        monitor = refit_table(source, store, key, table)
     sampler = TableSampler(source, table, config.batch_col, config.as_date, config.where)
 
-    one_batch = batch is not None
     since = str(batch) if one_batch else monitor.last_checked
     counts = sampler.batch_counts(since=since)
     n_rows = dict(zip(counts["batch"], counts["n_rows"], strict=True))
@@ -280,6 +353,7 @@ def _run(
             unresolved.discard(pending_batch)  # accepted, or checked again and clean
         if not one_batch:
             monitor.last_checked = pending_batch
+            monitor.checked_since_fit += 1
     monitor.unresolved_alerts = sorted(unresolved)
 
     if reports and results_table:

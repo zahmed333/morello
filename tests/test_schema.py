@@ -28,18 +28,17 @@ def test_columns_are_planned_by_kind():
     schema = TableSchema(max_categories=50).fit(table())
     kinds = {plan.column: plan.kind for plan in schema.plans}
     assert kinds == {
+        "row_id": "digits",
         "price": "num",
         "quantity_text": "numstr",
         "paid": "bool",
         "country": "cat",
         "created": "datetime",
         "shipped": "datetime",
+        "comment": "text_format",
     }
-    assert schema.skipped == {
-        "row_id": "identifier",
-        "comment": "identifier or free text",
-        "unused": "empty",
-    }
+    assert schema.format_only == {"row_id": "identifier", "comment": "identifier or free text"}
+    assert schema.skipped == {"unused": "empty"}
     assert "shipped__minus__created" in schema.features
     assert schema.source_column["shipped__minus__created"] == "shipped"
 

@@ -11,12 +11,14 @@ per-column checks (nulls, unexpected values, distribution shift, duplicates).
 It needs no rules. You give it a history of the table that you believe is clean, and then each
 new batch.
 
-<p><img src="assets/brand/sample-report.svg" alt="Terminal session: morello fit on 60 clean days of orders, then morello check on two new days. The first day is OK. The second day alerts, names the column total as suspect and prints three example rows." width="100%"></p>
+<p><img src="assets/brand/sample-report.svg" alt="Terminal session: morello fit on 60 clean days of orders, then morello check on two new days. The first day is OK. The second day alerts with one finding: total stopped fitting unit_price and quantity in 4.2% of rows. Three example rows follow, each with the value the model expected." width="100%"></p>
 
 The session above is real output on a synthetic orders table. On the second new day, 5% of
 orders carry another order's product, category and unit price. Every column of those rows looks
 normal on its own. Morello alerts because `total` no longer equals `unit_price` times
-`quantity`, names the column, and prints rows to look at. To reproduce it:
+`quantity`. Five checks fire, and the report states them as one finding: which column stopped
+fitting which other columns, in what share of rows, with example rows and the value the model
+expected in each. To reproduce it:
 
     python examples/make_orders.py
     morello fit   orders_history.parquet --batch-col date --model orders.monitor
@@ -76,6 +78,23 @@ DuckDB, Spark, Snowpark, a SQLAlchemy URL or a DB-API connection. Adapters for S
 Snowflake, dbt, Airflow, Dagster and Scala jobs are described in [`docs/integrations.md`](docs/integrations.md), together with
 which of them have actually been run.
 
+## Try it on your own history first
+
+    morello init     orders_history.parquet
+    morello backtest orders_history.parquet --batch-col order_date
+
+`init` looks at a table and says which column defines its batches, whether there is enough
+history, and which columns are modelled. `backtest` fits on the first half of the history and
+replays the rest the way a daily job would have run it:
+
+    fitted on the first 31 batches, replayed the next 31
+    1 of 31 batches would have alerted (3%)
+      2024-02-20  currency: 84% of rows have the value EUR (usual 50%)
+
+Every alert on history you know was clean is a false alarm, so the replay measures how noisy
+Morello would be on your table before you schedule anything. Both commands also take
+`--url URL --table NAME` and then run inside the warehouse.
+
 ## Use from the command line
 
     morello fit   orders_history.parquet --batch-col order_date --model orders.monitor
@@ -88,6 +107,30 @@ On tables, an alert outlives the run that raised it. `check-table` keeps exiting
 when there is nothing new to check, until the batch is accepted (`morello accept`) or passes a
 re-check (`morello check-table --batch ...`). A step that is retried after an alert therefore
 fails again.
+
+A report has one numbered finding per problem. A fault usually trips several checks, and
+`--details` lists all of them. When the affected rows are concentrated in one part of the
+batch, the finding says so ("100% of the affected rows have region=US (35% of the batch)").
+When one column changed and others stopped fitting as a result, they are listed under the
+column that changed.
+
+More commands for tables:
+
+    morello refit-table     --url URL --table orders --store STATE
+    morello check-reference --url URL --child orders.customer_id --parent customers.id \
+                            --batch-col order_ts
+    morello page            --url URL --table orders --store STATE \
+                            --results-table morello_results --out orders.html
+    morello check-table ... --slack-webhook https://hooks.slack.com/... --email-to oncall@x.org
+
+- `refit-table` trains again on the table as it is now. `fit-table --refit-every 30` makes
+  `check-table` do it on a schedule. Batches with an open alert are left out of training.
+- `check-reference` counts the rows whose key has no match in another table and alerts when
+  that share rises. The row model cannot see this, because it reads one table.
+- `page` writes a single HTML file with the open alerts, the status of every recent batch
+  and the findings behind each alert.
+- Slack and email messages carry the findings and the `accept` command. A button inside Slack
+  would need a web endpoint for Slack to call, which a command line tool does not have.
 
 Reports are coloured when they are printed to a terminal: `ALERT` in red, `OK` in cyan, column
 names in bold. The colours only repeat what the words say. `--color never` or the `NO_COLOR`
@@ -158,18 +201,30 @@ much each check normally moves. Alerts switch on after 14 calibrated batches
 |---|---|---|
 | `margin` | 3.0 | higher means fewer alerts |
 | `window` | 28 | batches that define "usual" |
-| `sample_rows` | 5000 | rows scored per batch |
+| `sample_rows` | 5000 | rows scored per batch; `"auto"` sizes it from the table's batches, up to 50,000 |
+| `refit_every` | off | `fit_table` only: fit again after this many checked batches |
 | `max_train_rows` | 150000 | rows used to train the model |
 
 ## Limits
 
+- A fault has to touch enough rows. Each batch is checked on a sample, and a share-of-rows
+  check does not alert on fewer than 9 sampled rows at the default margin. With 5,000 sampled
+  rows that is 0.18% of the batch, and with 50,000 it is 0.018%. `fit` and `init` print this
+  number for your table.
+- On clean synthetic history, replays that started right after fitting with the minimum
+  history raised a false alarm on 4 of 1,350 batch checks (0.3%).
 - Needs volume. With a few hundred rows per batch, or rows that come in clusters from few
   entities, normal variation hides most problems.
 - Does not catch duplicated rows through the model (a separate duplicate check is included)
   and is weak on a missing slice of the data.
 - Real changes in the source (a holiday, a fee change) alert too. Expect a few alerts a month
   on a busy table; `accept` teaches the monitor the new normal.
-- The model should be refitted when the table's meaning changes, or every few months.
+- The model should be refitted when the table's meaning changes, or every few months
+  (`refit-table`, or `--refit-every`). A column added to the table is reported in every
+  check and is not modelled until the next fit.
+- Identifier and free-text columns are checked for length and format only.
+- A reference check compares two tables in one database. It does not follow keys across
+  databases.
 - Saved monitors are compressed JSON (no pickle), split into a model part and a small history part.
 - One job at a time should check a given table. Saved state is not locked.
 - Evidence so far is from simulated failures on three public datasets. See [`docs/results.md`](docs/results.md).

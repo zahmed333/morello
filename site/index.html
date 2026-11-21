@@ -94,7 +94,7 @@
   figure { margin: 0; }
   figcaption { margin-top: var(--space-4); color: var(--muted); font-size: 15px; max-width: 75ch; }
   .terminal { border-radius: var(--radius-md); overflow-x: auto; background: #24090D; }
-  .terminal img { width: 100%; height: auto; min-width: 760px; aspect-ratio: 967 / 446; }
+  .terminal img { width: 100%; height: auto; min-width: 900px; aspect-ratio: 1154 / 306; }
   @media (prefers-color-scheme: dark) { .terminal { outline: 1px solid var(--line); } }
 
   /* Example table */
@@ -218,9 +218,9 @@
   <div class="wrap">
     <figure>
       <div class="terminal" tabindex="0" role="group" aria-label="Terminal session, scrollable">
-        <img src="assets/sample-report.svg" width="967" height="446" alt="Terminal session. morello fit trains on 60 clean days of orders. morello check reports the first new day as OK and the second as ALERT, names the column total as suspect, lists eight checks that fired and prints three example rows.">
+        <img src="assets/sample-report.svg" width="1154" height="306" alt="Terminal session. morello fit trains on 60 clean days of orders. morello check reports the first new day as OK and the second as ALERT with one finding: total stopped fitting unit_price and quantity in 4.2% of rows, 42 times the largest change seen before, five checks agree. Three example rows follow, each with the value the model expected for total.">
       </div>
-      <figcaption>Real output on a synthetic orders table. On the second day, 5% of orders carry another order's product, category and unit price. A script in the repository reproduces it.</figcaption>
+      <figcaption>Real output on a synthetic orders table. On the second day, 5% of orders carry another order's product, category and unit price. Five checks fire and the report states them as one finding. A script in the repository reproduces it.</figcaption>
     </figure>
   </div>
 
@@ -258,7 +258,7 @@
       <ol class="steps">
         <li><h3>Learn</h3><p>Give Morello a history of the table that you believe is clean, at least 20 batches. It trains a model that predicts each column from the other columns in the row, and it measures how much every check normally moves from batch to batch.</p></li>
         <li><h3>Check</h3><p>For each new batch it scores a sample of rows and asks how surprising they are given what it learned. It also runs per-column checks for nulls, unexpected values, distribution shift and duplicates.</p></li>
-        <li><h3>Alert</h3><p>A check alerts when it moves more than three times the largest change seen on any earlier clean batch. The report names the suspect columns and prints example rows. The alert stays open, and keeps failing the pipeline step, until a person accepts the batch or it passes a re-check.</p></li>
+        <li><h3>Alert</h3><p>A check alerts when it moves more than three times the largest change seen on any earlier clean batch. The report states each problem once, in a sentence, with example rows and the value the model expected. The alert stays open, and keeps failing the pipeline step, until a person accepts the batch or it passes a re-check.</p></li>
       </ol>
     </div>
   </section>
@@ -271,6 +271,11 @@
         <p>Morello is in private pre-release, so the repository is not public yet. This is what using it looks like.</p>
       </div>
       <div class="codes">
+        <div class="code wide">
+          <h3>Try it on your own history first</h3>
+<pre><code>morello init     orders_history.parquet                          <span class="c"># which column defines the batches</span>
+morello backtest orders_history.parquet --batch-col order_date   <span class="c"># which past batches would have alerted</span></code></pre>
+        </div>
         <div class="code wide">
           <h3>Command line</h3>
 <pre><code>morello fit   orders_history.parquet --batch-col order_date --model orders.monitor
@@ -362,7 +367,7 @@ reports = check_table(conn, "s3://bucket/morello", table="analytics.orders",
 
 <footer>
   <div class="wrap">
-    <span>Morello 0.6, private pre-release. <a href="https://github.com/zahmed333/morello">Source on GitHub</a> (private for now) · <a href="https://zulnoraina.com/">zulnoraina.com</a></span>
+    <span>Morello 0.7, private pre-release. <a href="https://github.com/zahmed333/morello">Source on GitHub</a> (private for now) · <a href="https://zulnoraina.com/">zulnoraina.com</a></span>
     <span>Fonts: Space Grotesk, Inter and JetBrains Mono, under the SIL Open Font License.</span>
   </div>
 </footer>

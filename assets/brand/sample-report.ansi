@@ -1,19 +1,12 @@
 $ morello fit orders_history.parquet --batch-col date --model orders.monitor
-trained on 8 columns, 30 calibration batches
-skipped columns: order_id (identifier or free text)
+trained on 9 columns, 30 calibration batches
+each batch is checked on up to 5000 rows; a fault has to touch about 0.18% of them to be noticed
+format and length checks only: order_id (identifier or free text)
 $ morello check orders_new.parquet --model orders.monitor
 batch 2024-03-01: [36mOK[0m (3000 rows checked, 30 batches of history)
 batch 2024-03-02: [1;31mALERT[0m (3000 rows checked, 31 batches of history)
-  suspect columns: [1mtotal[0m
-  - surprise | [1mtotal[0m: 171.8 (usual -2.726), [1m1993.5x[0m the largest change seen before
-  - extreme values | [1m<whole row>[0m: 0.04567 (usual 0), [1m45.7x[0m the largest change seen before
-  - extreme values | [1mtotal[0m: 0.04567 (usual 0), [1m45.7x[0m the largest change seen before
-  - broken relationship | [1m<whole row>[0m: 0.03633 (usual 0), [1m36.3x[0m the largest change seen before
-  - broken relationship | [1mtotal[0m: 0.03633 (usual 0), [1m36.3x[0m the largest change seen before
-  - rows contradicting their own columns (> 0 bits) | [1m<whole row>[0m: 0.02867 (usual 0), [1m28.7x[0m the largest change seen before
-  - broken relationship (strong) | [1m<whole row>[0m: 0.004667 (usual 0), [1m4.7x[0m the largest change seen before
-  - broken relationship (strong) | [1mtotal[0m: 0.004667 (usual 0), [1m4.7x[0m the largest change seen before
-  example rows for [1mtotal[0m:
-[2m    total=49.59, date=2024-03-02, country=JP, currency=JPY, product=P14, category=kitchen, unit_price=53.09, quantity=3[0m
-[2m    total=26.8, date=2024-03-02, country=US, currency=USD, product=P08, category=toys, unit_price=52.83, quantity=2[0m
-[2m    total=52.16, date=2024-03-02, country=DE, currency=EUR, product=P14, category=kitchen, unit_price=53.09, quantity=2[0m
+  1. [1mtotal stopped fitting unit_price and quantity in 4.2% of rows (usual 0%)[0m
+     42.0x the largest change seen before; 5 checks agree
+[2m     total=149.84 (model expects about 66.13), country=US, currency=USD, product=P29, category=garden, unit_price=33.15, quantity=2, express=False[0m
+[2m     total=10.36 (model expects about 106.17), country=US, currency=USD, product=P14, category=kitchen, unit_price=53.09, quantity=2, express=False[0m
+[2m     total=26.8 (model expects about 105.52), country=US, currency=USD, product=P08, category=toys, unit_price=52.83, quantity=2, express=False[0m

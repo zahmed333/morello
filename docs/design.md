@@ -36,12 +36,18 @@ Dependencies point one way, from the bottom of this list to the top.
 | `checks.py` | what is measured on a batch, and how chunks of a batch combine |
 | `history.py` | the alert rule and the record of clean batches |
 | `report.py` | the result of one check, as data and as text |
+| `findings.py` | groups the alerts of a batch into one sentence per problem |
 | `state.py` | the saved format |
 | `sql.py` | connections and the queries that count and sample batches |
 | `store.py` | where saved state lives: folder, object store or table |
 | `monitor.py` | ties the above together: fit, check, accept, save, load |
 | `distributed.py` | scores a batch on Spark executors |
 | `table.py` | runs a monitor against a table on a schedule |
+| `backtest.py` | replays a history to show which past batches would have alerted |
+| `profile.py` | looks at a table before fitting (`morello init`) |
+| `references.py` | checks that keys in one table exist in another |
+| `notify.py` | sends alerts to Slack and email |
+| `page.py` | writes a status page for a table as one HTML file |
 | `cli.py` | command line |
 | `integrations/` | thin adapters: Spark, Snowflake, dbt, Airflow, Dagster |
 
@@ -142,8 +148,16 @@ separate baselines when the key is a date.
   time would each save a history and the later save wins. Schedule one job per table.
 - **Sampling is not repeatable.** The sample uses the engine's random function, so two checks
   of the same batch read slightly different rows and can give slightly different numbers.
-- **No migration between format versions.** A monitor saved by an older format has to be
-  fitted again.
-- **The model does not update itself.** When the meaning of the table changes, refit.
+- **Old formats are read, not rewritten.** This version writes format 3 and reads formats 2
+  and 3. A monitor saved in format 2 keeps working and keeps skipping identifier columns
+  until it is fitted again.
+- **The model updates only when it is fitted again.** `refit_table` does it on request and
+  `refit_every` on a schedule. Between fits, `accept` widens tolerances but the model stays
+  the same.
+- **Findings are a reading of the alerts, not a diagnosis.** The sentence comes from the most
+  specific check that fired, and "as a result these stopped fitting" follows the model's own
+  dependencies between columns. Both can point at a symptom.
+- **A reference check scans both tables on every run.** It keeps no state, so its cost grows
+  with the child table. Run it less often on very large tables.
 - The Snowflake and Databricks adapters have not been run on those platforms.
   See [integrations.md](integrations.md).

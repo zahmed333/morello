@@ -164,6 +164,19 @@ class ColumnCoder:
         ) / (self.high_scale * ln2)
         return classes, np.clip(bits, 0, TAIL_CAP_BITS)
 
+    def class_values(self) -> np.ndarray:
+        """One representative value per class: the atom itself, or the middle of the bin.
+
+        NaN for the null, other and tail classes, which stand for no single value.
+        """
+        values = np.full(self.n_classes, np.nan)
+        for value, class_index in self.atoms.items():
+            values[class_index] = value
+        if not self.categorical:
+            middles = (self.edges[:-1] + self.edges[1:]) / 2
+            values[self.first_bin_class : self.first_bin_class + len(middles)] = middles
+        return values
+
     def to_state(self) -> dict[str, Any]:
         return {field: getattr(self, field) for field in self.STATE_FIELDS}
 

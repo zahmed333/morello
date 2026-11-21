@@ -75,6 +75,39 @@ Or the data is repaired and the batch passes a re-check:
 
     morello check-table --url ... --table analytics.orders --store ... --batch 2024-05-01
 
+## Around the scheduled check
+
+```python
+from morello.backtest import backtest_table
+from morello.table import fit_table, refit_table
+from morello.references import check_reference
+from morello.notify import notify
+from morello.page import write_page
+
+# Before scheduling: which past batches would have alerted? Nothing is saved.
+print(backtest_table(connection, "analytics.orders", "order_ts").text())
+
+# Fit again every 30 checked batches, or on request. Open alerts are left out of training.
+fit_table(connection, "analytics.orders", "order_ts", store, refit_every=30)
+refit_table(connection, store, table="analytics.orders")
+
+# Keys that have no match in another table. Returns a Report like any other check.
+report = check_reference(
+    connection, "analytics.orders", "customer_id", "analytics.customers", "id", "order_ts"
+)
+
+# Tell people. Returns the channels that were reached; a failure is logged, not raised.
+notify("analytics.orders", reports, unresolved, slack_webhook=url, email_to=["oncall@x.org"])
+
+# One HTML file with open alerts, the status of each batch and the findings.
+write_page(connection, store, "ops.morello_results", "orders.html", table="analytics.orders")
+```
+
+Email is sent through the SMTP server named by `MORELLO_SMTP_HOST`, `MORELLO_SMTP_PORT`,
+`MORELLO_SMTP_USER` and `MORELLO_SMTP_PASSWORD`, from `MORELLO_EMAIL_FROM`. The Slack message
+was tested against a local HTTP server and the email against a stand-in for the SMTP client.
+Neither has been sent through Slack or a real mail server.
+
 ## Spark and Databricks
 
 ```python
@@ -199,7 +232,7 @@ after the batch was accepted. `examples/scala/README.md` has the commands.
 | rows_checked, n_alerts | sample size and number of checks that fired |
 | suspect_columns | columns named by the alerts, most suspicious first |
 | top_check, top_column, top_ratio | the strongest alert |
-| details | JSON with the alerts and example rows |
+| details | JSON with the findings (one sentence per problem), the alerts and example rows |
 
 ## State
 

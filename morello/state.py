@@ -23,7 +23,8 @@ from typing import Any
 import lightgbm as lgb
 import numpy as np
 
-FORMAT_VERSION = 2
+FORMAT_VERSION = 3  # 3 added format-only columns to the schema
+READABLE_FORMATS = (2, 3)
 MODEL, HISTORY = "model", "history"
 
 _ARRAY, _TUPLE, _PAIRS, _BOOSTER, _FLOAT = "__array__", "__tuple__", "__pairs__", "__lgb__", "__f__"
@@ -84,10 +85,10 @@ def unpack(data: bytes, kind: str) -> dict[str, Any]:
         document = json.loads(gzip.decompress(data).decode("utf-8"))
     except (OSError, ValueError) as error:
         raise StateError(f"not a saved morello {kind}: {error}") from error
-    if document.get("format") != FORMAT_VERSION:
+    if document.get("format") not in READABLE_FORMATS:
         raise StateError(
             f"saved {kind} has format {document.get('format')!r}; this version of morello reads "
-            f"format {FORMAT_VERSION}. Fit the monitor again."
+            f"formats {READABLE_FORMATS}. Fit the monitor again."
         )
     if document.get("kind") != kind:
         raise StateError(f"expected a saved {kind}, found a {document.get('kind')!r}")

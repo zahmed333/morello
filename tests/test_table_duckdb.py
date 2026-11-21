@@ -30,6 +30,7 @@ def warehouse(tmp_path_factory):
     connection = duckdb.connect(str(path))
     connection.register("staged", make_orders())
     connection.execute("CREATE TABLE orders AS SELECT * FROM staged")
+    connection.execute("SELECT setseed(0.5)").fetchall()  # row sampling uses random()
     store = TableStore(connect(connection), "morello_state")
     monitor = fit_table(
         connection,
@@ -49,7 +50,7 @@ def warehouse(tmp_path_factory):
 def test_table_runner_end_to_end(warehouse):
     connection, store, monitor, _ = warehouse
     assert monitor.table_config.slices == ["EU", "US", "APAC"]
-    assert "order_id" in monitor.schema.skipped
+    assert "order_id" in monitor.schema.format_only
     assert monitor.batches_until_ready == 0
 
     # The two March days are new. Each is checked as a whole and once per region.

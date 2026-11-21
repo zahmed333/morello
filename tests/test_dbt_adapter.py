@@ -10,6 +10,7 @@ def test_fit_then_check_then_keep_reporting_an_unresolved_alert():
     connection = duckdb.connect()
     connection.register("staged", make_orders(n_days=62).query("order_ts < '2024-03-01'"))
     connection.execute("CREATE TABLE orders AS SELECT * FROM staged")
+    connection.execute("SELECT setseed(0.5)").fetchall()  # row sampling uses random()
 
     def build():
         rows = run(

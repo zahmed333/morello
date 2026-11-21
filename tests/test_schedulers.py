@@ -80,7 +80,7 @@ def test_operator_fails_on_an_alert_and_on_every_retry(warehouse):
     ]
 
     warehouse.add_broken_day()
-    with pytest.raises(AirflowException, match="suspect columns: currency"):
+    with pytest.raises(AirflowException, match="currency: "):
         warehouse.operator().execute()
     with pytest.raises(AirflowException, match="alerted in an earlier run"):
         warehouse.operator().execute()

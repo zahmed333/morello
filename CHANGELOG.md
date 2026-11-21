@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.7.0
+
+Added
+- `morello backtest` (`backtest`, `backtest_table`): fit on the first part of a history and
+  replay the rest, to see which past batches would have alerted before anything is scheduled.
+- `morello init` (`profile_frame`, `profile_table`): which column defines the batches, whether
+  there is enough history, which columns are modelled, and the command to run next.
+- One finding per problem. A report groups the checks that fired into numbered findings, each
+  a sentence such as "total stopped fitting unit_price and quantity in 4.2% of rows (usual
+  0%)". Example rows show the value the model expected. `--details` lists every check.
+- Where the affected rows are: a finding names the value of another column that most of its
+  rows share, when there is one.
+- Columns that stopped fitting because another column changed are listed under that column.
+- `refit_table` and `morello refit-table` train again with the saved settings and leave out
+  batches with an open alert. `fit_table(refit_every=N)` makes `check_table` do it after N
+  checked batches.
+- New columns in a batch and columns missing from it are named in the report.
+- Identifier and free-text columns are no longer skipped. Each contributes its length and,
+  for text, whether its format was seen in training.
+- `check_reference` and `morello check-reference`: the share of rows whose key has no match in
+  another table, with the same alert rule and no saved state.
+- `morello check-table --slack-webhook ... --email-to ...` sends the findings and the accept
+  command to people. A failed notification never changes the result of a check.
+- `morello page` writes a status page for a table as one HTML file.
+- `sample_rows="auto"` sizes the sample from the table's batches, between 5,000 and 50,000
+  rows. `Monitor.smallest_detectable_share` states the share of rows a fault has to touch.
+
+Changed
+- The saved format is now 3. Formats 2 and 3 are read.
+- Check numbers are unchanged on tables without identifier or free-text columns (verified on
+  fixed inputs). On tables that have them, the model has extra features, so numbers differ
+  from 0.6. The benchmark in `docs/results.md` was run on 0.5 and has not been re-run.
+- Example rows no longer repeat the batch column.
+- Table tests pin the engine's random seed. Sampling in SQL is random, and about 1 clean
+  replay in 11 raised a false alarm somewhere in 30 batches, which made the tests flaky.
+
 ## 0.6.0
 
 Added
