@@ -365,9 +365,15 @@ reports = check_table(conn, "s3://bucket/morello", table="analytics.orders",
 
     function copyText(text) {
       if (navigator.clipboard && window.isSecureContext) {
-        return navigator.clipboard.writeText(text);
+        return navigator.clipboard.writeText(text).catch(function () {
+          return copyWithSelection(text);   // the clipboard permission was refused
+        });
       }
-      return new Promise(function (resolve, reject) {   // older browsers and plain http
+      return copyWithSelection(text);       // older browsers and plain http
+    }
+
+    function copyWithSelection(text) {
+      return new Promise(function (resolve, reject) {
         var area = document.createElement("textarea");
         area.value = text;
         area.setAttribute("readonly", "");
