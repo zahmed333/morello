@@ -10,6 +10,8 @@ What happens when a run fails part-way:
 - The results table is an append-only log. A retried run can append a batch a second time.
   Rows are identified by (table_name, batch, segment); read the one with the latest checked_at.
 - Learning a batch twice has no effect: the history keeps one entry per batch.
+- An alert outlives the run that raised it. The batch stays in unresolved_alerts until a person
+  accepts it or it is checked again and passes, so a task retried after an alert fails again.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from typing import Any
 
 import pandas as pd
 
+from . import state
 from .distributed import distributed_statistics
 from .monitor import MIN_FIT_BATCHES, Monitor, TableConfig
 from .report import Report
@@ -46,6 +49,7 @@ RESULT_COLUMNS = [
 ]
 MIN_SLICE_CHECK_ROWS = 50  # a slice with fewer sampled rows than this is not checked
 TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+ACCEPTED = "accepted"  # status written to the results table when a person accepts a batch
 
 SliceCounts = dict[str, dict[str, int]]  # batch -> slice value -> rows
 
@@ -167,12 +171,80 @@ def check_table(
 
     Returns the reports and, when results_table is given, appends one row per report to it.
     At most max_batches are checked per run; a later run continues where this one stopped.
+
+    A batch that alerts stays unresolved (see unresolved_alerts) until it is accepted or is
+    checked again without alerting.
     """
+    return _run(source, store, key, table, batch, results_table, update, max_batches, dialect)
+
+
+def accept_batch(
+    source: Any,
+    store: str | Store,
+    batch: str,
+    key: str | None = None,
+    table: str | None = None,
+    results_table: str | None = None,
+    dialect: str | None = None,
+) -> list[Report]:
+    """Record that an alerting batch was reviewed and is fine.
+
+    Tolerances widen to include the batch and it stops being unresolved. With results_table,
+    one row per report is appended with status "accepted", so jobs that read that table see
+    the decision.
+    """
+    return _run(
+        source, store, key, table, batch, results_table, "always", 1, dialect, status=ACCEPTED
+    )
+
+
+def unresolved_alerts(
+    store: str | Store, key: str | None = None, table: str | None = None
+) -> list[str]:
+    """Batches whose latest check alerted and that nobody has accepted, oldest first.
+
+    A gate should stop while this list is not empty. Asking again gives the same answer, so a
+    task that is retried after an alert fails again where it would otherwise find nothing new
+    to check and pass. Reads only the small history document.
+    """
+    data = open_store(store).get(f"{_key(key, table)}.history")
+    if data is None:
+        return []
+    return list(state.unpack(data, state.HISTORY).get("unresolved_alerts", []))
+
+
+def alert_summary(reports: list[Report], unresolved: list[str]) -> str:
+    """What should stop a pipeline, as text. Empty when nothing should.
+
+    Covers alerts in `reports` and batches still unresolved from earlier runs.
+    """
+    alerting = [report for report in reports if report.alert]
+    reported = {report.batch for report in alerting}
+    lines = [report.text() for report in alerting]
+    lines += [
+        f"batch {batch}: alerted in an earlier run and has not been accepted"
+        for batch in unresolved
+        if batch not in reported
+    ]
+    return "\n".join(lines)
+
+
+def _run(
+    source: Any,
+    store: str | Store,
+    key: str | None,
+    table: str | None,
+    batch: str | None,
+    results_table: str | None,
+    update: str,
+    max_batches: int,
+    dialect: str | None,
+    status: str | None = None,
+) -> list[Report]:
+    """check_table and accept_batch. `status`, when given, replaces the status written to
+    the results table."""
     source, store = connect(source, dialect), open_store(store)
-    if key is None:
-        if table is None:
-            raise ValueError("give key or table")
-        key = default_key(table)
+    key = _key(key, table)
     monitor = Monitor.load(store, key)
     config = monitor.table_config
     if config is None:
@@ -196,32 +268,36 @@ def check_table(
 
     slice_counts = _slice_counts(sampler, config, since=pending[0]) if pending else {}
     reports: list[Report] = []
+    unresolved = set(monitor.unresolved_alerts)
     for pending_batch in pending:
-        reports += _check_batch(
+        batch_reports = _check_batch(
             monitor, source, sampler, pending_batch, n_rows[pending_batch], update, slice_counts
         )
+        reports += batch_reports
+        if update != "always" and any(report.alert for report in batch_reports):
+            unresolved.add(pending_batch)
+        else:
+            unresolved.discard(pending_batch)  # accepted, or checked again and clean
         if not one_batch:
             monitor.last_checked = pending_batch
+    monitor.unresolved_alerts = sorted(unresolved)
 
     if reports and results_table:
-        source.append(results_table, result_rows(table, reports))
+        rows = result_rows(table, reports)
+        if status is not None:
+            rows["status"] = status
+        source.append(results_table, rows)
     if update != "never":
         monitor.save(store, key, history_only=True)
     return reports
 
 
-def accept_batch(
-    source: Any,
-    store: str | Store,
-    batch: str,
-    key: str | None = None,
-    table: str | None = None,
-    dialect: str | None = None,
-) -> list[Report]:
-    """Record that an alerting batch was reviewed and is fine, so tolerances widen to include it."""
-    return check_table(
-        source, store, key=key, table=table, batch=batch, update="always", dialect=dialect
-    )
+def _key(key: str | None, table: str | None) -> str:
+    if key is not None:
+        return key
+    if table is None:
+        raise ValueError("give key or table")
+    return default_key(table)
 
 
 def _check_batch(

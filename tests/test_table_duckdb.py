@@ -6,7 +6,7 @@ import pytest
 from conftest import make_orders
 from morello import Monitor, TableStore
 from morello.sql import connect
-from morello.table import accept_batch, check_table, fit_table
+from morello.table import accept_batch, alert_summary, check_table, fit_table, unresolved_alerts
 
 
 def rows_in(connection, table: str) -> int:
@@ -80,9 +80,20 @@ def test_table_runner_end_to_end(warehouse):
         report = check_table(connection, store, table="orders", batch="2024-03-03", update="never")
         return len(report[0].alerts)
 
+    # The alert outlives the run: a retry finds nothing new, and the batch is still unresolved.
+    assert check_table(connection, store, table="orders") == []
+    assert unresolved_alerts(store, table="orders") == ["2024-03-03"]
+    assert "2024-03-03: alerted in an earlier run" in alert_summary([], ["2024-03-03"])
+
     before = alerts_on_the_broken_day()
-    accept_batch(connection, store, "2024-03-03", table="orders")
+    accept_batch(connection, store, "2024-03-03", table="orders", results_table="morello_results")
     assert alerts_on_the_broken_day() < before
+    assert unresolved_alerts(store, table="orders") == []
+    latest_status = connection.execute(
+        "SELECT status FROM morello_results WHERE batch = '2024-03-03' AND segment = '' "
+        "ORDER BY checked_at DESC, status LIMIT 1"
+    ).fetchall()[0][0]
+    assert latest_status == "accepted"
 
 
 def test_a_run_that_dies_before_saving_is_repeated_without_double_learning(warehouse, monkeypatch):
@@ -100,7 +111,7 @@ def test_a_run_that_dies_before_saving_is_repeated_without_double_learning(wareh
             check_table(connection, store, table="orders", results_table="morello_results")
     # The results were written, the history was not, and the batch is still pending.
     first_attempt = rows_in(connection, "morello_results") - results_before
-    assert first_attempt == 4
+    assert first_attempt == 4  # the whole table and three regions
     assert len(Monitor.load(store, "orders").history) == history_before
 
     reports = check_table(connection, store, table="orders", results_table="morello_results")
@@ -123,3 +134,22 @@ def test_a_monitor_fitted_on_files_cannot_run_against_a_table(monitor, tmp_path)
     monitor.save(tmp_path, key="orders")
     with pytest.raises(ValueError, match="not fitted with fit_table"):
         check_table(duckdb.connect(), str(tmp_path), table="orders")
+
+
+def test_a_batch_that_passes_a_recheck_is_no_longer_unresolved(warehouse):
+    connection, store, _, _ = warehouse
+    add_day(connection, n_days=68, since="2024-03-08")
+    in_cents = "UPDATE orders SET amount = amount * 100 WHERE order_ts >= '2024-03-08'"
+    connection.execute(in_cents)
+    assert any(report.alert for report in check_table(connection, store, table="orders"))
+    assert unresolved_alerts(store, table="orders") == ["2024-03-08"]
+
+    # The data is repaired upstream and the batch is checked again.
+    connection.execute(in_cents.replace("* 100", "/ 100"))
+    reports = check_table(connection, store, table="orders", batch="2024-03-08")
+    assert not any(report.alert for report in reports)
+    assert unresolved_alerts(store, table="orders") == []
+
+
+def test_unresolved_alerts_of_a_table_never_checked(tmp_path):
+    assert unresolved_alerts(str(tmp_path), table="orders") == []

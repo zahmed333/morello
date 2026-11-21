@@ -1,17 +1,19 @@
-"""dbt Python models (dbt-duckdb, and Snowflake, Databricks and BigQuery with Spark).
+"""dbt Python models. Run with dbt-duckdb; the same model file is meant for Snowflake,
+Databricks and BigQuery with Spark, where it has not been run.
 
 models/orders_quality.py:
 
     from morello.integrations.dbt import run
 
     def model(dbt, session):
-        dbt.config(materialized="incremental")
+        dbt.config(materialized="table")        # or "incremental" to keep every run's rows
         return run(session, dbt.ref("orders"), name="orders", batch_col="order_ts",
                    state_table=f"{dbt.this.schema}.morello_state")
 
 dbt finds dependencies by reading the model file, so the dbt.ref("...") call has to appear
-there. The model returns one row per check made in this run. A test on the model then fails
-the build when a batch alerts:
+there. The model returns one row per check made in this run, plus one row with status
+"unresolved" for every batch that alerted in an earlier run and has not been accepted. A test
+on the model then fails the build while any batch is in either state:
 
     models:
       - name: orders_quality
@@ -19,6 +21,8 @@ the build when a batch alerts:
           - morello_ok          # macro in macros/morello_ok.sql
 
 The first run trains the monitor, which needs 20 or more batches in the upstream model.
+To accept a batch, call morello.table.accept_batch with the same state table (see
+examples/dbt/README.md).
 """
 
 from __future__ import annotations
@@ -37,10 +41,12 @@ from ..table import (
     default_key,
     fit_table,
     result_rows,
+    unresolved_alerts,
 )
 
 SOURCE_VIEW = "_morello_src"
 TRAINED = "trained"  # status of the single row returned by the run that fits the monitor
+UNRESOLVED = "unresolved"  # a batch that alerted in an earlier run and is not accepted
 
 
 def run(
@@ -64,7 +70,10 @@ def run(
     if store.get(f"{key}.model") is None:
         monitor = fit_table(source, view, batch_col, store, key=key, **fit_options)
         return _trained_row(name, monitor.last_checked)
-    return result_rows(name, check_table(source, store, key=key, table=view))
+    reports = check_table(source, store, key=key, table=view)
+    checked = {report.batch for report in reports}
+    earlier = [batch for batch in unresolved_alerts(store, key) if batch not in checked]
+    return pd.concat([result_rows(name, reports), _unresolved_rows(name, earlier)])
 
 
 def _as_view(relation: Any, session: Any) -> str:
@@ -80,16 +89,27 @@ def _as_view(relation: Any, session: Any) -> str:
     return SOURCE_VIEW
 
 
+def _unresolved_rows(name: str, batches: list[str]) -> pd.DataFrame:
+    """One row per batch that alerted in an earlier run and is still not accepted."""
+    rows = [_row(name, batch, UNRESOLVED) for batch in batches]
+    return pd.DataFrame(rows, columns=RESULT_COLUMNS)
+
+
 def _trained_row(name: str, last_batch: str | None) -> pd.DataFrame:
+    return pd.DataFrame([_row(name, last_batch or "", TRAINED)], columns=RESULT_COLUMNS)
+
+
+def _row(name: str, batch: str, status: str) -> dict[str, Any]:
+    """A results row that does not come from a check."""
     row = dict.fromkeys(RESULT_COLUMNS, "")
     row.update(
         checked_at=datetime.now(timezone.utc).strftime(TIMESTAMP_FORMAT),
         table_name=name,
-        batch=last_batch or "",
-        status=TRAINED,
+        batch=batch,
+        status=status,
         rows_checked=0,
         n_alerts=0,
         top_ratio=0.0,
         details="{}",
     )
-    return pd.DataFrame([row], columns=RESULT_COLUMNS)
+    return row

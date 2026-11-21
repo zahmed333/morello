@@ -13,7 +13,9 @@ Tables (any SQLAlchemy URL, or duckdb:path/to/file.db):
 STATE is a folder or a cloud URL such as s3://bucket/morello.
 
 Exit codes: 0 no alert, 1 at least one batch alerted, 2 the command could not run. `check` and
-`check-table` can therefore gate a pipeline step.
+`check-table` can therefore gate a pipeline step. `check-table` keeps exiting with 1 after an
+alert, also when there is nothing new to check, until the batch is accepted or passes a re-check
+(`check-table --batch ...`).
 
 Reports are coloured when printed to a terminal. --color always|never overrides, and NO_COLOR
 is respected. -v prints progress to stderr.
@@ -32,7 +34,7 @@ from . import term
 from .monitor import Monitor, batch_keys
 from .report import Report
 from .state import StateError
-from .table import accept_batch, check_table, fit_table
+from .table import accept_batch, alert_summary, check_table, fit_table, unresolved_alerts
 
 EXIT_OK, EXIT_ALERT, EXIT_ERROR = 0, 1, 2
 COLOR_CHOICES = ("auto", "always", "never")
@@ -109,6 +111,7 @@ def build_parser() -> argparse.ArgumentParser:
     accept = commands.add_parser("accept", parents=[shared], help="mark a reviewed batch as fine")
     _add_table_options(accept)
     accept.add_argument("--batch", required=True)
+    accept.add_argument("--results-table", help="also record the decision in this table")
     accept.set_defaults(run=run_accept)
     return parser
 
@@ -192,12 +195,30 @@ def run_check_table(args: argparse.Namespace) -> int:
     )
     if not reports:
         print("no new batches")
-    return _print_reports(reports, args)
+    exit_code = _print_reports(reports, args)
+    earlier = alert_summary([], _still_unresolved(args, reports))
+    if earlier:
+        print(earlier)
+        return EXIT_ALERT
+    return exit_code
+
+
+def _still_unresolved(args: argparse.Namespace, reports: list[Report]) -> list[str]:
+    """Batches that alerted in an earlier run, are not accepted, and are not in `reports`."""
+    reported = {report.batch for report in reports}
+    unresolved = unresolved_alerts(args.store, args.key, args.table)
+    return [batch for batch in unresolved if batch not in reported]
 
 
 def run_accept(args: argparse.Namespace) -> int:
     reports = accept_batch(
-        args.url, args.store, args.batch, key=args.key, table=args.table, dialect=args.dialect
+        args.url,
+        args.store,
+        args.batch,
+        key=args.key,
+        table=args.table,
+        results_table=args.results_table,
+        dialect=args.dialect,
     )
     if not reports:
         raise ValueError(f"batch {args.batch!r} was not found in {args.table}")

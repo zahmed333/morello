@@ -1,12 +1,15 @@
-"""Airflow operator. NOT RUN INSIDE AN AIRFLOW DEPLOYMENT YET; the function it calls is tested.
+"""Airflow operator. Run on Airflow 3.4 with a DuckDB table (see docs/integrations.md).
 
-MorelloCheckOperator(
-    task_id="orders_quality",
-    connect=lambda: my_connection(),
-    table="analytics.orders",
-    store="s3://bucket/morello",
-    results_table="ops.morello_results",
-)
+    MorelloCheckOperator(
+        task_id="orders_quality",
+        connect=lambda: my_connection(),
+        table="analytics.orders",
+        store="s3://bucket/morello",
+        results_table="ops.morello_results",
+    )
+
+The task fails when a batch alerts, and keeps failing on retries and later runs until the batch
+is accepted (`morello accept`) or passes a re-check. It returns the reports as XCom.
 """
 
 from __future__ import annotations
@@ -15,14 +18,19 @@ from collections.abc import Callable
 from typing import Any
 
 from ..store import Store
-from ..table import check_table
+from ..table import alert_summary, check_table, unresolved_alerts
 
 try:
+    from airflow.sdk import BaseOperator  # Airflow 3
+except ImportError:
+    try:
+        from airflow.models import BaseOperator  # Airflow 2
+    except ImportError:  # lets the module be imported, and the operator tested, without Airflow
+        BaseOperator = object
+try:
     from airflow.exceptions import AirflowException
-    from airflow.models import BaseOperator
-except ImportError:  # lets the module be imported, and the operator tested, without Airflow
+except ImportError:
     AirflowException = RuntimeError
-    BaseOperator = object
 
 
 class MorelloCheckOperator(BaseOperator):
@@ -58,9 +66,7 @@ class MorelloCheckOperator(BaseOperator):
             results_table=self.results_table,
             dialect=self.dialect,
         )
-        alerting = [report for report in reports if report.alert]
-        if alerting and self.fail_on_alert:
-            raise AirflowException(
-                "morello alert:\n" + "\n".join(report.text() for report in alerting)
-            )
+        problems = alert_summary(reports, unresolved_alerts(self.store, self.key, self.table))
+        if problems and self.fail_on_alert:
+            raise AirflowException("morello alert:\n" + problems)
         return [report.to_dict() for report in reports]

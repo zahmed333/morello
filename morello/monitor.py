@@ -96,6 +96,7 @@ class Monitor:
         # changes after every check
         self.histories: dict[str, SegmentHistory] = {}
         self.last_checked: str | None = None  # last batch a table run has processed
+        self.unresolved_alerts: list[str] = []  # batches whose latest table check alerted
 
     # ------------------------------------------------------------------ fitting
     def fit(
@@ -136,7 +137,7 @@ class Monitor:
         self.model = TableModel(self.schema.features, self.threads).fit(encoded)
         self.checks = BatchChecks(self.schema.features).fit(encoded)
         self.model_id = uuid.uuid4().hex
-        self.histories, self.last_checked = {}, None
+        self.histories, self.last_checked, self.unresolved_alerts = {}, None, []
         log.info(
             "trained on %d rows, %d columns; skipped %s",
             len(train),
@@ -333,6 +334,7 @@ class Monitor:
                 "model_id": self.model_id,
                 "histories": {seg: hist.to_state() for seg, hist in self.histories.items()},
                 "last_checked": self.last_checked,
+                "unresolved_alerts": self.unresolved_alerts,
             },
         )
 
@@ -360,6 +362,8 @@ class Monitor:
                 seg: SegmentHistory.from_state(hist) for seg, hist in history["histories"].items()
             }
             monitor.last_checked = history["last_checked"]
+            # Added after format 2 was first written, so older files may not have it.
+            monitor.unresolved_alerts = history.get("unresolved_alerts", [])
         return monitor
 
     def save(self, target: str | Store, key: str = "monitor", history_only: bool = False) -> None:

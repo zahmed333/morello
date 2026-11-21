@@ -161,6 +161,13 @@
     .snippet pre { padding-top: 56px; }   /* the Copy button gets a row of its own */
     nav ul { gap: 0 var(--space-4); justify-content: flex-end; }
   }
+  @media (max-width: 520px) {
+    /* The total is the point of the example, so it has to fit without scrolling. */
+    .orders th:first-child, .orders td:first-child, .orders th:last-child, .orders td:last-child { display: none; }
+    .orders th, .orders td { padding: 12px 8px; }
+    .orders th:nth-child(2), .orders td:nth-child(2) { padding-left: 14px; }
+    nav li.wide { display: none; }   /* the hero links to the evidence */
+  }
   @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .button, .copy { transition: none; } }
 </style>
 </head>
@@ -181,8 +188,9 @@
       <ul>
         <li class="optional"><a href="#how">How it works</a></li>
         <li><a href="#start">Usage</a></li>
-        <li><a href="#evidence">Evidence</a></li>
+        <li class="wide"><a href="#evidence">Evidence</a></li>
         <li class="optional"><a href="#platforms">Where it runs</a></li>
+        <li><a href="https://github.com/zahmed333/morello">GitHub</a></li>
       </ul>
     </nav>
   </div>
@@ -226,7 +234,7 @@
       </div>
       <div>
         <div class="scroll" tabindex="0" role="group" aria-label="Four example orders, scrollable">
-          <table>
+          <table class="orders">
             <thead><tr><th>order</th><th>product</th><th class="num">unit price</th><th class="num">qty</th><th class="num">total</th><th>row</th></tr></thead>
             <tbody>
               <tr><td class="mono">03-02-4</td><td>P27 toys</td><td class="num">48.76</td><td class="num">4</td><td class="num">195.04</td><td><span class="status ok">OK</span></td></tr>
@@ -250,7 +258,7 @@
       <ol class="steps">
         <li><h3>Learn</h3><p>Give Morello a history of the table that you believe is clean, at least 20 batches. It trains a model that predicts each column from the other columns in the row, and it measures how much every check normally moves from batch to batch.</p></li>
         <li><h3>Check</h3><p>For each new batch it scores a sample of rows and asks how surprising they are given what it learned. It also runs per-column checks for nulls, unexpected values, distribution shift and duplicates.</p></li>
-        <li><h3>Alert</h3><p>A check alerts when it moves more than three times the largest change seen on any earlier clean batch. The report names the suspect columns and prints example rows. A person can accept a batch that turned out fine.</p></li>
+        <li><h3>Alert</h3><p>A check alerts when it moves more than three times the largest change seen on any earlier clean batch. The report names the suspect columns and prints example rows. The alert stays open, and keeps failing the pipeline step, until a person accepts the batch or it passes a re-check.</p></li>
       </ol>
     </div>
   </section>
@@ -339,10 +347,12 @@ reports = check_table(conn, "s3://bucket/morello", table="analytics.orders",
             <tr><td>DuckDB tables</td><td><span class="status ok">TESTED</span></td><td>including 13.8 million raw taxi rows</td></tr>
             <tr><td>Spark</td><td><span class="status ok">TESTED</span></td><td>local session, with scoring on executors</td></tr>
             <tr><td>dbt</td><td><span class="status ok">TESTED</span></td><td>dbt-duckdb; the build fails when a batch alerts</td></tr>
+            <tr><td>Airflow</td><td><span class="status ok">TESTED</span></td><td>Airflow 3.4; the task fails on an alert and on every retry</td></tr>
+            <tr><td>Dagster</td><td><span class="status ok">TESTED</span></td><td>Dagster 1.13; the asset check fails until the batch is accepted</td></tr>
+            <tr><td>Scala gate</td><td><span class="status ok">TESTED</span></td><td>compiled and run with spark-submit on Spark 4.3</td></tr>
             <tr><td>Snowflake</td><td><span class="status alert">NOT RUN</span></td><td>stored procedure and SQL dialect are written</td></tr>
             <tr><td>Databricks</td><td><span class="status alert">NOT RUN</span></td><td>same code as the Spark test</td></tr>
-            <tr><td>Airflow, Dagster</td><td><span class="status alert">NOT RUN</span></td><td>operator and asset check are written</td></tr>
-            <tr><td>Scala</td><td><span class="status alert">NO NATIVE API</span></td><td>Scala jobs gate on the results table</td></tr>
+            <tr><td>Scala API for the model</td><td><span class="status alert">NOT BUILT</span></td><td>scoring runs in Python</td></tr>
           </tbody>
         </table>
       </div>
@@ -352,7 +362,7 @@ reports = check_table(conn, "s3://bucket/morello", table="analytics.orders",
 
 <footer>
   <div class="wrap">
-    <span>Morello 0.5, private pre-release. <a href="https://zulnoraina.com/">zulnoraina.com</a></span>
+    <span>Morello 0.6, private pre-release. <a href="https://github.com/zahmed333/morello">Source on GitHub</a> (private for now) · <a href="https://zulnoraina.com/">zulnoraina.com</a></span>
     <span>Fonts: Space Grotesk, Inter and JetBrains Mono, under the SIL Open Font License.</span>
   </div>
 </footer>

@@ -2,6 +2,8 @@
 
 # Morello
 
+**Website:** [zulnoraina.com/morello](https://zulnoraina.com/morello/)
+
 Morello flags batches of a table whose rows stop making sense together: records joined to the
 wrong record, swapped columns, changed units, remapped codes, lost precision. It also runs basic
 per-column checks (nulls, unexpected values, distribution shift, duplicates).
@@ -82,6 +84,11 @@ which of them have actually been run.
 Exit codes: 0 when nothing alerts, 1 when a batch alerts, 2 when the command could not run. A
 pipeline step can therefore gate on `check`. CSV files work too.
 
+On tables, an alert outlives the run that raised it. `check-table` keeps exiting with 1, also
+when there is nothing new to check, until the batch is accepted (`morello accept`) or passes a
+re-check (`morello check-table --batch ...`). A step that is retried after an alert therefore
+fails again.
+
 Reports are coloured when they are printed to a terminal: `ALERT` in red, `OK` in cyan, column
 names in bold. The colours only repeat what the words say. `--color never` or the `NO_COLOR`
 environment variable turns them off, and `--color always` keeps them when output is piped.
@@ -97,8 +104,10 @@ environment variable turns them off, and `--color always` keeps them when output
 | Snowflake stored procedure and SQL dialect | written, not run against Snowflake |
 | Databricks | same code as the Spark test, not run on Databricks |
 | dbt on Snowflake, Databricks or BigQuery | same model file, not run on those platforms |
-| Airflow operator, Dagster asset check | written, not run inside those schedulers |
-| Scala | no native API; Scala jobs gate on the results table |
+| Airflow operator | tested inside Airflow 3.4: the task fails on an alert and on every retry |
+| Dagster asset check | tested inside Dagster 1.13: the check fails until the batch is accepted |
+| Scala gate on the results table | compiled with Scala 2.13 and run with spark-submit on Spark 4.3 |
+| Scala API for the model | not built; scoring runs in Python |
 
 Setup for each platform is in [`docs/integrations.md`](docs/integrations.md).
 
@@ -172,6 +181,8 @@ run fails part-way. In short:
 
 - A run can be repeated. The history keeps one entry per batch, and a run that dies starts
   again from the same batch.
+- An alert stays open until a person accepts the batch or it passes a re-check, so a retried
+  task gives the same verdict.
 - Saved state is never half-written, and a history is only ever loaded with the model it
   belongs to.
 - The cost of a check depends on the sample size, not on the size of the table.

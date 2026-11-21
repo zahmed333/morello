@@ -58,6 +58,22 @@ def test_fit_and_check_a_table(tmp_path, capsys):
     assert "no new batches" in capsys.readouterr().out
     assert main(["accept", *common, "--batch", "1999-01-01"]) == EXIT_ERROR
 
+    # A broken day alerts, and a second run with nothing new still exits with 1.
+    connection = duckdb.connect(str(database))
+    connection.execute(
+        "INSERT INTO orders SELECT order_ts + INTERVAL 1 DAY, order_id, region, "
+        "CASE WHEN region = 'US' THEN 'EUR' ELSE currency END, amount, items "
+        "FROM orders WHERE order_ts >= '2024-02-24'"
+    )
+    connection.close()
+    assert main(["check-table", *common]) == EXIT_ALERT
+    assert "batch 2024-02-25: ALERT" in capsys.readouterr().out
+    assert main(["check-table", *common]) == EXIT_ALERT
+    assert "2024-02-25: alerted in an earlier run" in capsys.readouterr().out
+    assert main(["accept", *common, "--batch", "2024-02-25"]) == EXIT_OK
+    capsys.readouterr()
+    assert main(["check-table", *common]) == EXIT_OK
+
 
 def report(status: str) -> Report:
     alerts = [Alert("surprise", "total", 68.03, -3.294, 802.1)] if status == "alert" else []

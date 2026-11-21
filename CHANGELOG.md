@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.6.0
+
+Added
+- An alert stays open until it is dealt with. `check_table` records every batch whose latest
+  check alerted; `unresolved_alerts` returns them. `morello check-table`, the Airflow operator,
+  the Dagster asset check and the dbt test fail while a batch is unresolved, so a task that is
+  retried after an alert fails again. Before, the retry found nothing new to check and passed.
+- A batch leaves the list when it is accepted or passes a re-check
+  (`morello check-table --batch ...`).
+- `accept_batch(results_table=...)` and `morello accept --results-table` append a row with
+  status `accepted`.
+- `morello.integrations.spark.unresolved`, and `fail_on_alert(reports, unresolved)`.
+- Tests that run the operator inside Airflow and the asset check inside Dagster when those are
+  installed, and a test for the dbt adapter.
+
+Changed
+- The Airflow operator imports from `airflow.sdk` first (Airflow 3) and falls back to
+  `airflow.models` (Airflow 2).
+- The Scala gate and the dbt `morello_ok` test read the latest row of every batch and segment.
+  The Scala gate used to read only the newest run. `MorelloGate` has a `main` for spark-submit.
+- On Spark, the check for whether a table exists asks the catalog and no longer logs an error.
+
+Verified
+- Airflow 3.4.0 and Dagster 1.13.31 against a DuckDB table; the Scala gate compiled with Scala
+  2.13.18 and run with spark-submit on Spark 4.3.0.
+
 ## 0.5.0
 
 A restructuring for readability and safe re-runs. Check results are unchanged: the same inputs

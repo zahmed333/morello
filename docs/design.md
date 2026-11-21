@@ -59,6 +59,10 @@ Dependencies point one way, from the bottom of this list to the top.
   identified by `(table_name, batch, segment)` and readers take the latest `checked_at`. This
   is at-least-once delivery with a deduplication key, chosen over losing a result.
 - A backlog is worked through oldest first, a bounded number of batches per run.
+- An alert is state, not an event. The batch is recorded as unresolved until a person accepts
+  it or it passes a re-check, and every gate reads that record. A task retried after an alert
+  finds nothing new to check and still fails. Running the adapters inside Airflow showed that
+  a gate looking only at the current run passes on the retry.
 
 **State is never half-written.**
 
@@ -141,5 +145,5 @@ separate baselines when the key is a date.
 - **No migration between format versions.** A monitor saved by an older format has to be
   fitted again.
 - **The model does not update itself.** When the meaning of the table changes, refit.
-- Snowflake, Databricks, Airflow and Dagster adapters have not been run on those platforms.
+- The Snowflake and Databricks adapters have not been run on those platforms.
   See [integrations.md](integrations.md).

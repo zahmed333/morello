@@ -120,6 +120,10 @@ class SparkSource(Source):
         """The query as a Spark DataFrame, left on the cluster."""
         return self.spark.sql(sql)
 
+    def table_exists(self, table: str) -> bool:
+        """Asks the catalog, which avoids the error Spark logs for a query on a missing table."""
+        return bool(self.spark.catalog.tableExists(identifier(table)))
+
 
 class SnowparkSource(Source):
     """A Snowpark session, for code running inside Snowflake."""

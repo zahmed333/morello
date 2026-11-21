@@ -17,8 +17,10 @@ table that any other tool can read.
 | Snowflake stored procedure, Snowflake SQL dialect | written, **not run against Snowflake** |
 | Databricks (Unity Catalog tables, DBFS, workflows) | same code as the Spark test, **not run on Databricks** |
 | dbt on Snowflake / Databricks / BigQuery | same model file, **not run on those platforms** |
-| Airflow operator, Dagster asset check | written, **not run inside those schedulers** |
-| Native Scala API | not built; Scala jobs gate on the results table (see below) |
+| Airflow operator | tested inside Airflow 3.4.0 (`tests/test_schedulers.py`) |
+| Dagster asset check | tested inside Dagster 1.13.31 (`tests/test_schedulers.py`) |
+| Scala gate on the results table | compiled with Scala 2.13.18, run with spark-submit on Spark 4.3.0 |
+| Native Scala API for the model | not built; scoring runs in Python (see below) |
 
 ## Any SQL engine (Python)
 
@@ -52,6 +54,26 @@ distinct values (a load id, an hour bucket you computed, a file name).
 
 `check-table` exits with code 1 on an alert, which is enough for cron, GitHub Actions, Airflow's
 BashOperator and most schedulers.
+
+## Alerts stay open until someone deals with them
+
+A scheduler retries failed tasks. On the retry there is nothing new to check, and a gate that
+only looked at the current run would pass. Morello therefore records every batch whose latest
+check alerted, and every gate fails while that list is not empty:
+
+- `morello check-table` exits with 1 and names the batch.
+- The Airflow operator raises, and the Dagster asset check does not pass.
+- `morello.table.unresolved_alerts(store, table=...)` returns the batches, for your own gate.
+- The dbt model returns a row with status `unresolved`, and the Scala gate reads the latest row
+  of every batch in the results table.
+
+A batch leaves the list in one of two ways. A person accepts it:
+
+    morello accept --url ... --table analytics.orders --store ... --batch 2024-05-01 --results-table ops.morello_results
+
+Or the data is repaired and the batch passes a re-check:
+
+    morello check-table --url ... --table analytics.orders --store ... --batch 2024-05-01
 
 ## Spark and Databricks
 
@@ -113,12 +135,50 @@ models:
 `morello.integrations.dagster.morello_check_result` wrap `check_table`. Both fail the task or
 the asset check on an alert and attach the report.
 
+```python
+from morello.integrations.airflow import MorelloCheckOperator
+
+MorelloCheckOperator(
+    task_id="orders_quality",
+    connect=lambda: my_connection(),  # called on the worker
+    table="analytics.orders",
+    store="s3://bucket/morello",
+    results_table="ops.morello_results",
+)
+```
+
+```python
+from dagster import asset_check
+
+from morello.integrations.dagster import morello_check_result
+
+
+@asset_check(asset=orders)
+def orders_quality():
+    return morello_check_result(
+        my_connection(), table="analytics.orders", store="s3://bucket/morello"
+    )
+```
+
+Both were run inside the scheduler against a DuckDB table: a DAG run with `dag.test()` on
+Airflow 3.4.0, and `materialize` with the asset check on Dagster 1.13.31. In each, two clean
+days passed, a day with a broken currency failed and named the column, a repeated run with
+nothing new failed again, and the run after `accept` passed. The operator imports from
+`airflow.sdk` and falls back to `airflow.models`, so it should load on Airflow 2, where it has
+not been run. Neither adapter has been run against a deployed scheduler with remote workers.
+
 ## Scala
 
 There is no Scala port of the model. A Scala Spark job uses Morello in two steps: a Python step
 runs the check and writes the results table, and the Scala job calls
 `MorelloGate.requireClean(spark, "ops.morello_results", "main.sales.orders")`
-(`examples/scala/MorelloGate.scala`) before it continues.
+(`examples/scala/MorelloGate.scala`) before it continues. The same file can run as a step of
+its own with `spark-submit --class MorelloGate`, which exits with a non-zero code on an alert.
+
+The gate was compiled with Scala 2.13.18 and run with spark-submit on Spark 4.3.0 against a
+results table written by the Python check through a shared Hive metastore. It exited with 0
+after a clean day, with 1 after a broken day and again after a repeated check, and with 0
+after the batch was accepted. `examples/scala/README.md` has the commands.
 
 ## Very large tables
 
