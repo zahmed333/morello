@@ -126,6 +126,17 @@
   pre { margin: 0; padding: var(--space-6); border-radius: var(--radius-md); background: #24090D; color: #EEF2FA; overflow-x: auto; line-height: 1.6; font-size: 14px; }
   pre .c { color: #B7C5E0; } pre .k { color: #8DA5CA; }
   @media (prefers-color-scheme: dark) { pre { outline: 1px solid var(--line); } }
+  .snippet { position: relative; min-width: 0; }
+  .copy { position: absolute; top: 10px; right: 10px; min-width: 72px; min-height: 36px; padding: 0 12px;
+          border: 1px solid #6A353C; border-radius: var(--radius-sm); background: #391217; color: #EEF2FA;
+          font: 600 13px/1 var(--font-sans); cursor: pointer; transition: background-color 150ms ease-out; }
+  .copy::before { content: ""; position: absolute; inset: -5px; }   /* 46px touch target */
+  .copy:hover { background: #4A1C22; }
+  .copy:active { transform: scale(0.97); }
+  .copy:focus-visible { outline: 3px solid #8DA5CA; outline-offset: 2px; }
+  .copy[data-state="copied"] { color: #8DA5CA; }
+  .copy[data-state="failed"] { color: #EE9AA2; }
+  .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
   /* Evidence */
   .stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-6); margin-bottom: var(--space-10); }
@@ -147,9 +158,10 @@
     .steps { gap: var(--space-6); }
     section { padding-block: var(--space-10); }
     nav li.optional { display: none; }
+    .snippet pre { padding-top: 56px; }   /* the Copy button gets a row of its own */
     nav ul { gap: 0 var(--space-4); justify-content: flex-end; }
   }
-  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .button { transition: none; } }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .button, .copy { transition: none; } }
 </style>
 </head>
 <body>
@@ -344,5 +356,66 @@ reports = check_table(conn, "s3://bucket/morello", table="analytics.orders",
     <span>Fonts: Space Grotesk, Inter and JetBrains Mono, under the SIL Open Font License.</span>
   </div>
 </footer>
+
+<p class="visually-hidden" role="status" aria-live="polite" id="copy-status"></p>
+<script>
+  // Adds a Copy button to every code block. Without JavaScript the blocks are unchanged.
+  (function () {
+    var status = document.getElementById("copy-status");
+
+    function copyText(text) {
+      if (navigator.clipboard && window.isSecureContext) {
+        return navigator.clipboard.writeText(text);
+      }
+      return new Promise(function (resolve, reject) {   // older browsers and plain http
+        var area = document.createElement("textarea");
+        area.value = text;
+        area.setAttribute("readonly", "");
+        area.style.position = "fixed";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        area.select();
+        var copied = document.execCommand("copy");
+        document.body.removeChild(area);
+        return copied ? resolve() : reject(new Error("copy was blocked"));
+      });
+    }
+
+    document.querySelectorAll(".code pre").forEach(function (block) {
+      var name = block.parentElement.querySelector("h3").textContent;
+      var wrapper = document.createElement("div");
+      wrapper.className = "snippet";
+      block.parentNode.insertBefore(wrapper, block);
+      wrapper.appendChild(block);
+
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "copy";
+      button.textContent = "Copy";
+      button.setAttribute("aria-label", "Copy the " + name + " example");
+      wrapper.appendChild(button);
+
+      var reset;
+      button.addEventListener("click", function () {
+        copyText(block.innerText.replace(/\n+$/, "") + "\n").then(
+          function () { show("copied", "Copied", name + " example copied"); },
+          function () { show("failed", "Press Ctrl+C", "Copy was blocked. Select the code and press Ctrl+C."); }
+        );
+      });
+
+      function show(state, label, message) {
+        button.dataset.state = state;
+        button.textContent = label;
+        status.textContent = message;
+        clearTimeout(reset);
+        reset = setTimeout(function () {
+          delete button.dataset.state;
+          button.textContent = "Copy";
+          status.textContent = "";
+        }, 1800);
+      }
+    });
+  })();
+</script>
 </body>
 </html>
