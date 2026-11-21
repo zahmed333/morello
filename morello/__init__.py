@@ -1,6 +1,20 @@
-"""morello: flag batches of a table whose rows stop making sense together."""
-from .monitor import Monitor, Report, merge_stats
-from .store import LocalStore, FsspecStore, TableStore
+"""Morello: flag batches of a table whose rows stop making sense together."""
 
-__all__ = ["Monitor", "Report", "merge_stats", "LocalStore", "FsspecStore", "TableStore"]
-__version__ = "0.4.0"
+from .checks import merge_statistics
+from .monitor import Monitor, TableConfig
+from .report import Alert, Report
+from .state import StateError
+from .store import FsspecStore, LocalStore, TableStore
+
+__all__ = [
+    "Alert",
+    "FsspecStore",
+    "LocalStore",
+    "Monitor",
+    "Report",
+    "StateError",
+    "TableConfig",
+    "TableStore",
+    "merge_statistics",
+]
+__version__ = "0.5.0"

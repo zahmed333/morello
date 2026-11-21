@@ -1,74 +1,138 @@
-"""Where a monitor's state lives: a local folder, cloud storage, or a table in the warehouse."""
-import base64, os, time
+"""Where a monitor's saved state lives: a local folder, cloud storage, or a warehouse table.
+
+A store maps a name to bytes. One job at a time should write a given name: stores do not lock,
+and the last writer wins.
+"""
+
+from __future__ import annotations
+
+import base64
+import os
+from typing import TYPE_CHECKING, Protocol
+
 import pandas as pd
 
-CHUNK = 700_000        # characters of base64 per row in a table store
+if TYPE_CHECKING:
+    from .sql import Source
+
+EXTENSION = ".json.gz"
+CHUNK_CHARS = 700_000  # base64 characters per row in a table store
+
+
+class Store(Protocol):
+    def put(self, name: str, data: bytes) -> None: ...
+
+    def get(self, name: str) -> bytes | None:
+        """The bytes last put under `name`, or None when nothing was."""
+        ...
 
 
 class LocalStore:
-    def __init__(self, root):
+    """Files in a folder. A write replaces the file in one step, so no reader sees half of one."""
+
+    def __init__(self, root: str) -> None:
         self.root = str(root)
 
-    def put(self, name, data):
+    def put(self, name: str, data: bytes) -> None:
         os.makedirs(self.root, exist_ok=True)
-        tmp = os.path.join(self.root, name + ".tmp")
-        with open(tmp, "wb") as f:
-            f.write(data)
-        os.replace(tmp, os.path.join(self.root, name + ".tbz"))
+        path = os.path.join(self.root, name + EXTENSION)
+        temporary = path + ".tmp"
+        with open(temporary, "wb") as file:
+            file.write(data)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
 
-    def get(self, name):
-        p = os.path.join(self.root, name + ".tbz")
-        return open(p, "rb").read() if os.path.exists(p) else None
+    def get(self, name: str) -> bytes | None:
+        path = os.path.join(self.root, name + EXTENSION)
+        if not os.path.exists(path):
+            return None
+        with open(path, "rb") as file:
+            return file.read()
 
 
 class FsspecStore:
-    """Any fsspec URL: s3://bucket/path, abfss://..., gs://..., dbfs:/..."""
-    def __init__(self, root):
+    """Any fsspec URL: s3://bucket/path, abfss://..., gs://..., dbfs:/...
+
+    Object stores replace an object in one step, so a reader sees the old or the new version.
+    """
+
+    def __init__(self, root: str) -> None:
         import fsspec
-        self.fs, self.root = fsspec.core.url_to_fs(str(root))
 
-    def put(self, name, data):
-        self.fs.makedirs(self.root, exist_ok=True)
-        with self.fs.open(f"{self.root}/{name}.tbz", "wb") as f:
-            f.write(data)
+        self.filesystem, self.root = fsspec.core.url_to_fs(str(root))
 
-    def get(self, name):
-        p = f"{self.root}/{name}.tbz"
-        if not self.fs.exists(p):
+    def put(self, name: str, data: bytes) -> None:
+        self.filesystem.makedirs(self.root, exist_ok=True)
+        with self.filesystem.open(f"{self.root}/{name}{EXTENSION}", "wb") as file:
+            file.write(data)
+
+    def get(self, name: str) -> bytes | None:
+        path = f"{self.root}/{name}{EXTENSION}"
+        if not self.filesystem.exists(path):
             return None
-        with self.fs.open(p, "rb") as f:
-            return f.read()
+        with self.filesystem.open(path, "rb") as file:
+            return file.read()
 
 
 class TableStore:
-    """State kept in a warehouse table, so scheduled jobs anywhere can share it. Append-only:
-    every put writes a new version and get reads the newest, which works on engines without DELETE."""
-    def __init__(self, source, table):
-        self.src, self.table = source, table
+    """State kept in a warehouse table, so scheduled jobs anywhere can share it.
 
-    def put(self, name, data):
-        b64 = base64.b64encode(data).decode("ascii")
-        version = int(time.time() * 1000)
-        parts = [b64[i:i + CHUNK] for i in range(0, len(b64), CHUNK)] or [""]
-        self.src.append(self.table, pd.DataFrame({
-            "name": name, "version": version, "part": range(len(parts)), "n_parts": len(parts), "chunk": parts}))
+    The table is append-only. Every put writes a new version as one or more rows, and get reads
+    the highest complete version. Nothing is updated or deleted, which works on every engine,
+    and earlier versions stay available for inspection. Versions count up from the highest one
+    present, so their order does not depend on any machine's clock.
+    """
 
-    def get(self, name):
-        q = name.replace("'", "''")
-        try:
-            df = self.src.query(
-                f"SELECT part, n_parts, chunk FROM {self.table} WHERE name = '{q}' AND version = "
-                f"(SELECT MAX(version) FROM {self.table} WHERE name = '{q}') ORDER BY part")
-        except Exception:
-            return None                       # table does not exist yet
-        df.columns = [c.lower() for c in df.columns]
-        if df.empty or len(df) != int(df["n_parts"].iloc[0]):
-            return None
-        return base64.b64decode("".join(df.sort_values("part")["chunk"]))
+    def __init__(self, source: Source, table: str) -> None:
+        self.source, self.table = source, table
+
+    def put(self, name: str, data: bytes) -> None:
+        text = base64.b64encode(data).decode("ascii")
+        chunks = [text[i : i + CHUNK_CHARS] for i in range(0, len(text), CHUNK_CHARS)] or [""]
+        rows = pd.DataFrame(
+            {
+                "name": name,
+                "version": self._latest_version(name) + 1,
+                "part": range(len(chunks)),
+                "n_parts": len(chunks),
+                "chunk": chunks,
+            }
+        )
+        self.source.append(self.table, rows)
+
+    def get(self, name: str) -> bytes | None:
+        for version in range(self._latest_version(name), 0, -1):
+            rows = self.source.query(
+                f"SELECT part, n_parts, chunk FROM {self.table} "
+                f"WHERE name = {_literal(name)} AND version = {version} ORDER BY part"
+            )
+            rows.columns = [column.lower() for column in rows.columns]
+            if len(rows) and len(rows) == int(rows["n_parts"].iloc[0]):
+                return base64.b64decode("".join(rows.sort_values("part")["chunk"]))
+            # otherwise a writer is part-way through this version: use the one before it
+        return None
+
+    def _latest_version(self, name: str) -> int:
+        """The highest version written under `name`, or 0 when there is none."""
+        if not self.source.table_exists(self.table):
+            return 0
+        result = self.source.query(
+            f"SELECT MAX(version) AS v FROM {self.table} WHERE name = {_literal(name)}"
+        )
+        latest = result.iloc[0, 0]
+        return 0 if pd.isna(latest) else int(latest)
 
 
-def open_store(target):
+def open_store(target: str | Store) -> Store:
+    """A store object as is; a URL as an FsspecStore; anything else as a local folder."""
     if hasattr(target, "put") and hasattr(target, "get"):
         return target
-    t = str(target)
-    return FsspecStore(t) if "://" in t or t.startswith("dbfs:/") else LocalStore(t)
+    location = str(target)
+    if "://" in location or location.startswith("dbfs:/"):
+        return FsspecStore(location)
+    return LocalStore(location)
+
+
+def _literal(text: str) -> str:
+    return "'" + str(text).replace("'", "''") + "'"

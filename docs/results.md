@@ -1,7 +1,7 @@
 # Evidence so far
 
 All failures are simulated. Data: NYC yellow taxi trips and NYC EMS dispatch records (real,
-public) and Synthea lab records (synthetic). Code for the experiments is in `experiments/`.
+public) and Synthea lab records (synthetic). Code for the experiments is in `research/`.
 
 ## 1. Controlled experiment on an untouched month (May 2024)
 
@@ -63,7 +63,7 @@ sampling inside the engine, with a separate alert history per vendor (`slice_col
 
 The Spark adapter (SQL sampling, state in a table, scoring on executors) and the dbt model were
 tested on small synthetic tables only. Snowflake, Databricks, Airflow and Dagster adapters have
-not been run. See `INTEGRATIONS.md`.
+not been run. See [integrations.md](integrations.md).
 
 ## Not yet shown
 

@@ -1,104 +1,105 @@
-"""Save and load a Monitor without pickle.
+"""The saved format of a monitor.
 
-The state is gzip-compressed JSON. Only the four morello classes, numpy arrays and LightGBM
-model text can be reconstructed from it, so loading a file cannot run arbitrary code."""
-import gzip, json
-import numpy as np
+A saved monitor is two gzip-compressed JSON documents:
+
+- the model     everything fixed at fit time. Large, written once.
+- the history   what changes after each check. Small, rewritten after every run.
+
+Each document carries a format version and its kind, and both carry the id of the fit they
+belong to, so a history is never applied to a model it was not built from. Loading only builds
+numbers, strings, arrays and LightGBM models from the file. It cannot run code, unlike pickle.
+
+Format history:
+  1  internal attribute dump (0.1 to 0.4)
+  2  explicit fields per class; valid JSON (non-finite numbers are written as strings)
+"""
+
+from __future__ import annotations
+
+import gzip
+import json
+from typing import Any
+
 import lightgbm as lgb
+import numpy as np
 
-FORMAT = 1
-HISTORY_FIELDS = ("histories", "runmax", "n_valid", "cursor")
+FORMAT_VERSION = 2
+MODEL, HISTORY = "model", "history"
 
-
-def _classes():
-    from .model import TableModel, ColumnCoder
-    from .schema import Schema
-    from .monitor import Monitor
-    return {c.__name__: c for c in (TableModel, ColumnCoder, Schema, Monitor)}
+_ARRAY, _TUPLE, _PAIRS, _BOOSTER, _FLOAT = "__array__", "__tuple__", "__pairs__", "__lgb__", "__f__"
 
 
-def _enc(o, skip=()):
-    if o is None or isinstance(o, (bool, str)):
-        return o
-    if isinstance(o, (int, float)):
-        return o
-    if isinstance(o, np.generic):
-        return _enc(o.item())
-    if isinstance(o, np.ndarray):
-        return {"__nd__": o.tolist(), "dtype": str(o.dtype)}
-    if isinstance(o, tuple):
-        return {"__tuple__": [_enc(x) for x in o]}
-    if isinstance(o, list):
-        return [_enc(x) for x in o]
-    if isinstance(o, dict):
-        if all(isinstance(k, str) for k in o):
-            return {"__map__": {k: _enc(v) for k, v in o.items()}}
-        return {"__dict__": [[_enc(k), _enc(v)] for k, v in o.items()]}
-    if isinstance(o, lgb.Booster):
-        return {"__lgb__": o.model_to_string()}
-    name = type(o).__name__
-    if name in _classes():
-        return {"__obj__": name, "state": {k: _enc(v) for k, v in vars(o).items() if k not in skip}}
-    raise TypeError(f"cannot save object of type {name}")
+class StateError(ValueError):
+    """A saved monitor could not be read, or its parts do not belong together."""
 
 
-def _dec(o):
-    if isinstance(o, list):
-        return [_dec(x) for x in o]
-    if not isinstance(o, dict):
-        return o
-    if "__nd__" in o:
-        return np.array(o["__nd__"], dtype=o["dtype"])
-    if "__tuple__" in o:
-        return tuple(_dec(x) for x in o["__tuple__"])
-    if "__map__" in o:
-        return {k: _dec(v) for k, v in o["__map__"].items()}
-    if "__dict__" in o:
-        return {_dec(k): _dec(v) for k, v in o["__dict__"]}
-    if "__lgb__" in o:
-        return lgb.Booster(model_str=o["__lgb__"])
-    if "__obj__" in o:
-        cls = _classes().get(o["__obj__"])
-        if cls is None:
-            raise ValueError(f"unknown class in saved state: {o['__obj__']}")
-        obj = cls.__new__(cls)
-        obj.__dict__.update({k: _dec(v) for k, v in o["state"].items()})
-        return obj
-    raise ValueError("unrecognised structure in saved state")
+def encode(value: Any) -> Any:
+    """Turn a state value into something json.dumps accepts. The inverse of decode()."""
+    if value is None or isinstance(value, (bool, str, int)):
+        return value
+    if isinstance(value, float):
+        return value if np.isfinite(value) else {_FLOAT: repr(value)}
+    if isinstance(value, np.generic):
+        return encode(value.item())
+    if isinstance(value, np.ndarray):
+        return {_ARRAY: [encode(item) for item in value.tolist()], "dtype": str(value.dtype)}
+    if isinstance(value, tuple):
+        return {_TUPLE: [encode(item) for item in value]}
+    if isinstance(value, list):
+        return [encode(item) for item in value]
+    if isinstance(value, dict):
+        if all(isinstance(key, str) and not key.startswith("__") for key in value):
+            return {key: encode(item) for key, item in value.items()}
+        return {_PAIRS: [[encode(key), encode(item)] for key, item in value.items()]}
+    if isinstance(value, lgb.Booster):
+        return {_BOOSTER: value.model_to_string()}
+    raise TypeError(f"cannot save a value of type {type(value).__name__}")
 
 
-def _pack(payload):
-    return gzip.compress(json.dumps({"format": FORMAT, "payload": payload}).encode("utf-8"), compresslevel=6)
+def decode(value: Any) -> Any:
+    if isinstance(value, list):
+        return [decode(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    if _FLOAT in value:
+        return float(value[_FLOAT])
+    if _ARRAY in value:
+        return np.array(decode(value[_ARRAY]), dtype=value["dtype"])
+    if _TUPLE in value:
+        return tuple(decode(item) for item in value[_TUPLE])
+    if _PAIRS in value:
+        return {decode(key): decode(item) for key, item in value[_PAIRS]}
+    if _BOOSTER in value:
+        return lgb.Booster(model_str=value[_BOOSTER])
+    return {key: decode(item) for key, item in value.items()}
 
 
-def _unpack(data):
-    doc = json.loads(gzip.decompress(data).decode("utf-8"))
-    if doc.get("format") != FORMAT:
-        raise ValueError(f"unsupported state format {doc.get('format')}")
-    return doc["payload"]
+def pack(kind: str, state: dict[str, Any]) -> bytes:
+    document = {"format": FORMAT_VERSION, "kind": kind, "state": encode(state)}
+    return gzip.compress(json.dumps(document, allow_nan=False).encode("utf-8"), compresslevel=6)
 
 
-def dump_model(mon):
-    """Everything fixed at fit time (large)."""
-    return _pack(_enc(mon, skip=HISTORY_FIELDS))
+def unpack(data: bytes, kind: str) -> dict[str, Any]:
+    try:
+        document = json.loads(gzip.decompress(data).decode("utf-8"))
+    except (OSError, ValueError) as error:
+        raise StateError(f"not a saved morello {kind}: {error}") from error
+    if document.get("format") != FORMAT_VERSION:
+        raise StateError(
+            f"saved {kind} has format {document.get('format')!r}; this version of morello reads "
+            f"format {FORMAT_VERSION}. Fit the monitor again."
+        )
+    if document.get("kind") != kind:
+        raise StateError(f"expected a saved {kind}, found a {document.get('kind')!r}")
+    return decode(document["state"])
 
 
-def dump_history(mon):
-    """What changes after each check (small)."""
-    return _pack(_enc({k: getattr(mon, k) for k in HISTORY_FIELDS}))
+def pack_statistics(statistics: dict[str, np.ndarray]) -> bytes:
+    """Statistics of one chunk of rows, for sending between machines."""
+    as_lists = {key: np.asarray(value, dtype=float).tolist() for key, value in statistics.items()}
+    return json.dumps(as_lists).encode("utf-8")
 
 
-def load_monitor(model_bytes, history_bytes=None):
-    mon = _dec(_unpack(model_bytes))
-    hist = _dec(_unpack(history_bytes)) if history_bytes else {}
-    for k in HISTORY_FIELDS:
-        setattr(mon, k, hist.get(k, {}))
-    return mon
-
-
-def pack_stats(st):
-    return json.dumps({k: np.asarray(v, dtype=float).tolist() for k, v in st.items()}).encode("utf-8")
-
-
-def unpack_stats(data):
-    return {k: np.array(v, dtype=float) for k, v in json.loads(bytes(data).decode("utf-8")).items()}
+def unpack_statistics(data: bytes) -> dict[str, np.ndarray]:
+    as_lists = json.loads(bytes(data).decode("utf-8"))
+    return {key: np.array(value, dtype=float) for key, value in as_lists.items()}

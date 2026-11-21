@@ -1,30 +1,65 @@
 """Airflow operator. NOT RUN INSIDE AN AIRFLOW DEPLOYMENT YET; the function it calls is tested.
 
-    MorelloCheckOperator(task_id="orders_quality", conn_factory=lambda: my_connection(),
-                           table="analytics.orders", store="s3://bucket/morello",
-                           results_table="ops.morello_results")
+MorelloCheckOperator(
+    task_id="orders_quality",
+    connect=lambda: my_connection(),
+    table="analytics.orders",
+    store="s3://bucket/morello",
+    results_table="ops.morello_results",
+)
 """
+
+from __future__ import annotations
+
+from typing import Any, Callable
+
+from ..store import Store
 from ..table import check_table
 
 try:
-    from airflow.models import BaseOperator
     from airflow.exceptions import AirflowException
-except Exception:                                        # Airflow not installed
-    BaseOperator, AirflowException = object, RuntimeError
+    from airflow.models import BaseOperator
+except ImportError:  # lets the module be imported, and the operator tested, without Airflow
+    AirflowException = RuntimeError
+    BaseOperator = object
 
 
 class MorelloCheckOperator(BaseOperator):
-    def __init__(self, conn_factory, table, store, key=None, results_table=None, dialect=None,
-                 fail_on_alert=True, **kwargs):
-        if BaseOperator is not object:
-            super().__init__(**kwargs)
-        self.conn_factory, self.table, self.store, self.key = conn_factory, table, store, key
-        self.results_table, self.dialect, self.fail_on_alert = results_table, dialect, fail_on_alert
+    """Checks new batches of a table and fails the task when one alerts."""
 
-    def execute(self, context=None):
-        reports = check_table(self.conn_factory(), self.store, key=self.key, table=self.table,
-                              results_table=self.results_table, dialect=self.dialect)
-        bad = [r for r in reports if r.alert]
-        if bad and self.fail_on_alert:
-            raise AirflowException("morello alert:\n" + "\n".join(r.text() for r in bad))
-        return [r.to_dict() for r in reports]
+    def __init__(
+        self,
+        connect: Callable[[], Any],
+        table: str,
+        store: str | Store,
+        key: str | None = None,
+        results_table: str | None = None,
+        dialect: str | None = None,
+        fail_on_alert: bool = True,
+        **operator_options: Any,
+    ) -> None:
+        if BaseOperator is not object:
+            super().__init__(**operator_options)
+        self.connect = connect  # called on the worker, so no connection is pickled into the DAG
+        self.table = table
+        self.store = store
+        self.key = key
+        self.results_table = results_table
+        self.dialect = dialect
+        self.fail_on_alert = fail_on_alert
+
+    def execute(self, context: Any = None) -> list[dict[str, Any]]:
+        reports = check_table(
+            self.connect(),
+            self.store,
+            key=self.key,
+            table=self.table,
+            results_table=self.results_table,
+            dialect=self.dialect,
+        )
+        alerting = [report for report in reports if report.alert]
+        if alerting and self.fail_on_alert:
+            raise AirflowException(
+                "morello alert:\n" + "\n".join(report.text() for report in alerting)
+            )
+        return [report.to_dict() for report in reports]

@@ -262,13 +262,13 @@ morello check orders_today.parquet   --model orders.monitor      <span class="c"
 <span class="k">from</span> morello <span class="k">import</span> Monitor
 
 history = pd.read_parquet("orders_history.parquet")
-mon = Monitor().fit(history, batch_col="order_date")     <span class="c"># daily batches by default</span>
+monitor = Monitor().fit(history, batch_col="order_date")  <span class="c"># daily batches by default</span>
 
-report = mon.check(pd.read_parquet("orders_today.parquet"))
+report = monitor.check(pd.read_parquet("orders_today.parquet"))
 print(report.text())
 <span class="k">if</span> report.alert:
     ...                                                   <span class="c"># stop the pipeline, page someone</span>
-mon.save("orders.monitor")                                <span class="c"># history grows with every clean batch</span></code></pre>
+monitor.save("orders.monitor")                            <span class="c"># history grows with every clean batch</span></code></pre>
         </div>
         <div class="code wide">
           <h3>A table in a warehouse</h3>
@@ -340,7 +340,7 @@ reports = check_table(conn, "s3://bucket/morello", table="analytics.orders",
 
 <footer>
   <div class="wrap">
-    <span>Morello 0.4, private pre-release. <a href="https://zulnoraina.com/">zulnoraina.com</a></span>
+    <span>Morello 0.5, private pre-release. <a href="https://zulnoraina.com/">zulnoraina.com</a></span>
     <span>Fonts: Space Grotesk, Inter and JetBrains Mono, under the SIL Open Font License.</span>
   </div>
 </footer>

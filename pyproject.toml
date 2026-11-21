@@ -4,20 +4,39 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "morello"
-version = "0.4.0"
+version = "0.5.0"
 description = "Flag batches of a table whose rows stop making sense together"
+readme = "README.md"
 requires-python = ">=3.9"
-dependencies = ["numpy", "pandas", "lightgbm", "pyarrow"]
+dependencies = ["numpy", "pandas>=2.0", "lightgbm>=4.0", "pyarrow"]
 
 [project.scripts]
-morello = "morello.__main__:main"
+morello = "morello.cli:main"
 
 [project.optional-dependencies]
 duckdb = ["duckdb"]
 sql = ["sqlalchemy"]
 cloud = ["fsspec"]
 spark = ["pyspark"]
-dev = ["pytest", "duckdb", "pyspark", "dbt-core", "dbt-duckdb"]
+dev = ["pytest", "ruff", "duckdb", "pyspark", "dbt-core", "dbt-duckdb"]
 
 [tool.setuptools]
 packages = ["morello", "morello.integrations"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning", "ignore::FutureWarning", "ignore::UserWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+extend-exclude = ["research"]  # the experiment scripts behind docs/results.md, kept as they were run
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "C4", "RET"]
+
+[tool.ruff.lint.per-file-ignores]
+"assets/**" = ["E501"]  # scripts that draw the brand files contain long SVG strings
+
+[tool.ruff.lint.isort]
+known-first-party = ["morello", "conftest"]

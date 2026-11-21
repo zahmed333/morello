@@ -31,6 +31,8 @@ normal on its own. Morello alerts because `total` no longer equals `unit_price` 
 - [How it works](#how-it-works)
 - [Settings](#settings)
 - [Limits](#limits)
+- [Design](#design)
+- [Development](#development)
 - [Files](#files)
 
 ## Install
@@ -43,16 +45,17 @@ normal on its own. Morello alerts because `total` no longer equals `unit_price` 
 import pandas as pd
 from morello import Monitor
 
-history = pd.read_parquet("orders_history.parquet")      # at least 20 batches; about 50 for alerts to be on from day one
-mon = Monitor().fit(history, batch_col="order_date")      # daily batches by default
-mon.save("orders.monitor")
+# At least 20 batches of history. About 50 are needed for alerts to be on from day one.
+history = pd.read_parquet("orders_history.parquet")
+monitor = Monitor().fit(history, batch_col="order_date")  # daily batches by default
+monitor.save("orders.monitor")
 
-report = mon.check(pd.read_parquet("orders_today.parquet"))
+report = monitor.check(pd.read_parquet("orders_today.parquet"))
 print(report.text())
 if report.alert:
-    ...                       # stop the pipeline, page someone
-    # mon.accept(report)      # if a person decides the batch was fine
-mon.save("orders.monitor")    # history grows with every clean batch
+    ...  # stop the pipeline, page someone
+    # monitor.accept(report)      # if a person decides the batch was fine
+monitor.save("orders.monitor", history_only=True)  # the history grows with every clean batch
 ```
 
 ## Use on a table in a warehouse
@@ -61,23 +64,23 @@ mon.save("orders.monitor")    # history grows with every clean batch
 from morello.table import fit_table, check_table
 
 fit_table(conn, "analytics.orders", batch_col="order_ts", store="s3://bucket/morello")
-reports = check_table(conn, "s3://bucket/morello", table="analytics.orders",
-                      results_table="ops.morello_results")
+reports = check_table(
+    conn, "s3://bucket/morello", table="analytics.orders", results_table="ops.morello_results"
+)
 ```
 
 The sample is taken by a query inside the warehouse, so table size does not matter. `conn` can be
 DuckDB, Spark, Snowpark, a SQLAlchemy URL or a DB-API connection. Adapters for Spark and Databricks,
-Snowflake, dbt, Airflow, Dagster and Scala jobs are described in `INTEGRATIONS.md`, together with
+Snowflake, dbt, Airflow, Dagster and Scala jobs are described in [`docs/integrations.md`](docs/integrations.md), together with
 which of them have actually been run.
 
 ## Use from the command line
 
-    python -m morello fit   orders_history.parquet --batch-col order_date --model orders.monitor
-    python -m morello check orders_today.parquet   --model orders.monitor --json report.json
+    morello fit   orders_history.parquet --batch-col order_date --model orders.monitor
+    morello check orders_today.parquet   --model orders.monitor --json report.json
 
-After `pip install .` the same commands are available as `morello fit`, `morello check` and so on.
-
-`check` exits with code 1 when a batch alerts, so it can gate a pipeline step. CSV files work too.
+Exit codes: 0 when nothing alerts, 1 when a batch alerts, 2 when the command could not run. A
+pipeline step can therefore gate on `check`. CSV files work too.
 
 Reports are coloured when they are printed to a terminal: `ALERT` in red, `OK` in cyan, column
 names in bold. The colours only repeat what the words say. `--color never` or the `NO_COLOR`
@@ -97,7 +100,7 @@ environment variable turns them off, and `--color always` keeps them when output
 | Airflow operator, Dagster asset check | written, not run inside those schedulers |
 | Scala | no native API; Scala jobs gate on the results table |
 
-Setup for each platform is in [`INTEGRATIONS.md`](INTEGRATIONS.md).
+Setup for each platform is in [`docs/integrations.md`](docs/integrations.md).
 
 ## Evidence so far
 
@@ -116,13 +119,13 @@ them on every day at every severity, against 0.06 for standard checks. NannyML's
 reconstruction, run on the same batches, detected 0.19 of failures on taxi and 0.34 on EMS.
 
 Morello has not been tested on real incidents or against commercial tools, and it was weak on a
-table with few rows per batch. The full tables and method are in [`RESULTS.md`](RESULTS.md).
+table with few rows per batch. The full tables and method are in [`docs/results.md`](docs/results.md).
 
 ## How it works
 
 1. **Columns.** Numbers, booleans, text categories and timestamps are handled automatically.
    Timestamps become hour-of-day plus the gap to the first timestamp column. Identifier and
-   free-text columns are skipped and listed in `mon.schema.skipped`.
+   free-text columns are skipped and listed in `monitor.schema.skipped`.
 2. **Model.** Each column is predicted from the columns before it (gradient-boosted trees). The
    model gives every value a probability given the rest of its row.
 3. **Checks per batch.**
@@ -138,7 +141,7 @@ table with few rows per batch. The full tables and method are in [`RESULTS.md`](
 
 `fit` trains the model on the earliest half of the history and uses the later half to learn how
 much each check normally moves. Alerts switch on after 14 calibrated batches
-(`mon.batches_until_ready`).
+(`monitor.batches_until_ready`).
 
 ## Settings
 
@@ -159,23 +162,34 @@ much each check normally moves. Alerts switch on after 14 calibrated batches
   on a busy table; `accept` teaches the monitor the new normal.
 - The model should be refitted when the table's meaning changes, or every few months.
 - Saved monitors are compressed JSON (no pickle), split into a model part and a small history part.
-- Evidence so far is from simulated failures on three public datasets. See `RESULTS.md`.
+- One job at a time should check a given table. Saved state is not locked.
+- Evidence so far is from simulated failures on three public datasets. See [`docs/results.md`](docs/results.md).
+
+## Design
+
+[`docs/design.md`](docs/design.md) explains how the code is organized and what happens when a
+run fails part-way. In short:
+
+- A run can be repeated. The history keeps one entry per batch, and a run that dies starts
+  again from the same batch.
+- Saved state is never half-written, and a history is only ever loaded with the model it
+  belongs to.
+- The cost of a check depends on the sample size, not on the size of the table.
+- Statistics add up across chunks of a batch, so a batch can be scored on many machines.
+
+## Development
+
+    pip install -e ".[dev]"
+    ruff check . && ruff format --check .
+    pytest                     # the Spark test is skipped when pyspark is not installed
 
 ## Files
 
-    morello/schema.py    column handling
-    morello/model.py     the predictive model
-    morello/monitor.py   checks, alert rule, reports
-    morello/term.py      colour for terminal output
-    morello/sql.py       sampling inside the warehouse
-    morello/table.py     fit and check a table; results rows
-    morello/state.py     saved format      morello/store.py   folder, cloud or table storage
-    morello/integrations/  spark, snowflake, dbt, airflow, dagster
-    examples/demo.py       synthetic orders table with a broken join, from Python
-    examples/make_orders.py  the files for the terminal session at the top of this page
-    examples/dbt/          dbt project       examples/scala/      Scala gate on the results table
-    experiments/           code and result files behind RESULTS.md
-    assets/brand/          logo, colours, type, slide template (see BRAND.md)
-    docs/                  landing page, published at zulnoraina.com/morello/
-    wrangler.jsonc         Cloudflare settings that publish docs/
-    tests/                 end-to-end, statistics, DuckDB, Spark and colour tests
+    morello/             the package; docs/design.md describes each module
+    tests/               unit tests, plus end-to-end tests on DuckDB and local Spark
+    examples/            demo.py and make_orders.py (synthetic orders), dbt/ project, scala/ gate
+    docs/                design.md, integrations.md, results.md
+    research/            the experiment scripts and result files behind docs/results.md
+    assets/brand/        logo, colours, type, slide template (see BRAND.md)
+    site/                landing page, published at zulnoraina.com/morello/
+    wrangler.jsonc       Cloudflare settings that publish site/

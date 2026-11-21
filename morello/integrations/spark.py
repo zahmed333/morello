@@ -1,69 +1,92 @@
 """Spark and Databricks.
 
-    from morello.integrations import spark as tbs
-    tbs.fit(spark, "catalog.schema.orders", "order_ts", store="dbfs:/morello", state_table=None)
-    reports = tbs.check(spark, "catalog.schema.orders", store="dbfs:/morello", results_table="ops.morello_results")
+    from morello.integrations import spark as morello_spark
+
+    morello_spark.fit(spark, "catalog.schema.orders", "order_ts", store="dbfs:/morello")
+    reports = morello_spark.check(
+        spark, "catalog.schema.orders", store="dbfs:/morello", results_table="ops.morello_results"
+    )
+    morello_spark.fail_on_alert(reports)
 
 Sampling runs as Spark SQL, so only the sampled rows reach the driver. With score_rows set,
 scoring itself runs on the executors and only sums and counts come back.
 """
-import pandas as pd
 
-from ..monitor import merge_stats
+from __future__ import annotations
+
+from typing import Any
+
+from ..distributed import distributed_statistics
+from ..monitor import Monitor
+from ..report import Report
 from ..sql import SparkSource
-from ..state import dump_model, load_monitor, pack_stats, unpack_stats
-from ..store import TableStore
-from ..table import fit_table, check_table
+from ..store import Store, TableStore
+from ..table import check_table, fit_table
 
-_CACHE = {}
-
-
-def distributed_stats(mon, sdf):
-    """Score a Spark DataFrame on the executors. Returns the batch's additive statistics."""
-    spark = sdf.sparkSession
-    bc = spark.sparkContext.broadcast(dump_model(mon))
-
-    def score(batches):
-        key = id(bc)
-        if key not in _CACHE:
-            _CACHE.clear(); _CACHE[key] = load_monitor(bc.value)
-        m = _CACHE[key]
-        for pdf in batches:
-            if len(pdf):
-                st, _ = m.stats(m.schema.transform(pdf))
-                yield pd.DataFrame({"s": [pack_stats(st)]})
-
-    rows = sdf.mapInPandas(score, "s binary").collect()
-    return merge_stats([unpack_stats(r["s"]) for r in rows])
+__all__ = [
+    "check",
+    "check_dataframe",
+    "distributed_statistics",
+    "fail_on_alert",
+    "fit",
+    "fit_dataframe",
+]
+SOURCE_VIEW = "_morello_src"
 
 
-def _store(spark, store, state_table):
-    return TableStore(SparkSource(spark), state_table) if state_table else store
+def fit(
+    spark: Any,
+    table: str,
+    batch_col: str,
+    store: str | Store | None = None,
+    state_table: str | None = None,
+    **options: Any,
+) -> Monitor:
+    """Fit a monitor on a table or view.
+
+    Keep the saved monitor in cloud storage (store=...) or in a table (state_table=...).
+    Other options are those of morello.table.fit_table.
+    """
+    return fit_table(
+        SparkSource(spark), table, batch_col, _store(spark, store, state_table), **options
+    )
 
 
-def fit(spark, table, batch_col, store=None, state_table=None, **kw):
-    """Fit a monitor on a table or view. Keep state in cloud storage (store=...) or in a table (state_table=...)."""
-    return fit_table(SparkSource(spark), table, batch_col, _store(spark, store, state_table), **kw)
+def check(
+    spark: Any,
+    table: str,
+    store: str | Store | None = None,
+    state_table: str | None = None,
+    **options: Any,
+) -> list[Report]:
+    """Check new batches of a table or view. Options are those of morello.table.check_table."""
+    return check_table(
+        SparkSource(spark), _store(spark, store, state_table), table=table, **options
+    )
 
 
-def check(spark, table, store=None, state_table=None, **kw):
-    return check_table(SparkSource(spark), _store(spark, store, state_table), table=table, **kw)
-
-
-def fit_dataframe(df, batch_col, store=None, state_table=None, view="_morello_src", **kw):
+def fit_dataframe(frame: Any, batch_col: str, **options: Any) -> Monitor:
     """Same as fit, for a DataFrame that is not a table."""
-    df.createOrReplaceTempView(view)
-    return fit(df.sparkSession, view, batch_col, store, state_table, **kw)
+    frame.createOrReplaceTempView(SOURCE_VIEW)
+    return fit(frame.sparkSession, SOURCE_VIEW, batch_col, **options)
 
 
-def check_dataframe(df, store=None, state_table=None, view="_morello_src", **kw):
-    df.createOrReplaceTempView(view)
-    return check(df.sparkSession, view, store, state_table, **kw)
+def check_dataframe(frame: Any, **options: Any) -> list[Report]:
+    frame.createOrReplaceTempView(SOURCE_VIEW)
+    return check(frame.sparkSession, SOURCE_VIEW, **options)
 
 
-def fail_on_alert(reports):
-    """Raise if any report alerts, to stop a job or workflow task."""
-    bad = [r for r in reports if r.alert]
-    if bad:
-        raise RuntimeError("morello alert:\n" + "\n".join(r.text() for r in bad))
+def fail_on_alert(reports: list[Report]) -> list[Report]:
+    """Raise if any report alerts, to stop a job or a workflow task."""
+    alerting = [report for report in reports if report.alert]
+    if alerting:
+        raise RuntimeError("morello alert:\n" + "\n".join(report.text() for report in alerting))
     return reports
+
+
+def _store(spark: Any, store: str | Store | None, state_table: str | None) -> str | Store:
+    if state_table:
+        return TableStore(SparkSource(spark), state_table)
+    if store is None:
+        raise ValueError("give store or state_table")
+    return store

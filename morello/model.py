@@ -1,301 +1,391 @@
-"""Autoregressive table model that assigns a code length (bits) to every value.
+"""A model of the whole table that says how surprising each value is, in bits.
 
-Each column is predicted from the columns before it. The code length of a
-value is -log2 of the probability the model gave it, which is the size an
-arithmetic coder driven by this model would produce.
+Each column is predicted from the columns before it, in a fixed order. The code length of a
+value is -log2 of the probability the model gave it: the size an arithmetic coder driven by
+this model would spend on the value. A row whose columns contradict each other costs many more
+bits than the model expected, and that excess is what the monitor watches.
 """
+
+from __future__ import annotations
+
+import logging
 import os
-import numpy as np
+from dataclasses import dataclass
+from typing import Any
+
 import lightgbm as lgb
+import numpy as np
+import pandas as pd
+
+from .coder import ESCAPE_BITS, ColumnCoder
+
+log = logging.getLogger(__name__)
+
+RESOLUTION = 0.01  # numeric values are coded to this precision
+MIN_PROBABILITY = 1e-6
+UNSEEN_CLASS_BITS = -np.log2(MIN_PROBABILITY) + ESCAPE_BITS  # a class absent from training
+
+BOOSTING_ROUNDS = 40
+EARLY_STOPPING_ROUNDS = 4
+VALIDATION_SHARE = 8  # the last 1/8 of the training rows decides when to stop boosting
+LIGHTGBM_PARAMS = {
+    "objective": "multiclass",
+    "learning_rate": 0.12,
+    "num_leaves": 31,
+    "min_data_in_leaf": 50,
+    "lambda_l2": 5.0,
+    "min_sum_hessian_in_leaf": 1.0,
+    "feature_fraction": 0.8,
+    "max_bin": 63,
+    "verbose": -1,
+    "seed": 0,
+}
+
+# A numeric column is coded relative to a grouping column when the group explains this much
+# of its variance (eta squared).
+GROUP_MIN_ETA_SQUARED = 0.5
+GROUP_MIN_KEYS, GROUP_MAX_KEYS = 5, 300
+GROUP_MIN_ROWS = 100
+GROUP_MIN_ROWS_PER_KEY = 5
+IQR_TO_SIGMA = 1.349  # interquartile range of a normal distribution, in standard deviations
+TRIM_QUANTILES = (0.001, 0.999)  # rows outside these are left out of the linear fit
 
 
-def default_threads():
-    """CPU cores actually available to this process (LightGBM's own default can oversubscribe in containers)."""
+def available_threads() -> int:
+    """CPU cores this process may use. LightGBM's own default oversubscribes in containers."""
     try:
         return max(1, len(os.sched_getaffinity(0)))
-    except AttributeError:
+    except AttributeError:  # not available on macOS and Windows
         return max(1, os.cpu_count() or 1)
 
-ESCAPE_BITS = 32.0   # cost of a value the model has no code for
-P_FLOOR = 1e-6
-TAIL_CAP = 64.0
+
+@dataclass
+class LinearFit:
+    """Least-squares prediction of a numeric column from the columns before it."""
+
+    mean: np.ndarray
+    scale: np.ndarray
+    coefficients: np.ndarray
+
+    def predict(self, earlier: np.ndarray) -> np.ndarray:
+        standardized = (np.nan_to_num(earlier, nan=0.0) - self.mean) / self.scale
+        return np.c_[standardized, np.ones(len(standardized))] @ self.coefficients
 
 
-class ColumnCoder:
-    """Maps a column's values to classes plus a within-class cost in bits."""
+@dataclass
+class GroupFit:
+    """Median and spread of a numeric column within each value of one earlier column."""
 
-    def __init__(self, name, res):
-        self.name, self.res = name, res
+    column_index: int
+    by_key: dict[float, tuple[float, float]]  # group value -> (median, robust scale)
+    overall: tuple[float, float]
 
-    def fit(self, x):
-        v = x[~np.isnan(x)]
-        uniq, cnt = np.unique(v, return_counts=True)
-        self.categorical = len(uniq) <= 20 or (
-            np.all(uniq == np.round(uniq)) and len(uniq) <= 300
+    def standardize(self, values: np.ndarray, keys: np.ndarray) -> np.ndarray:
+        median = np.full(len(values), self.overall[0])
+        scale = np.full(len(values), self.overall[1])
+        for key, (key_median, key_scale) in self.by_key.items():
+            selected = keys == key
+            median[selected], scale[selected] = key_median, key_scale
+        return np.round((values - median) / scale, 2) + 0.0  # + 0.0 turns -0.0 into 0.0
+
+
+@dataclass
+class ColumnModel:
+    """Everything needed to code one column given the columns before it."""
+
+    coder: ColumnCoder
+    linear: LinearFit | None
+    code_residual: bool  # code the column minus its linear prediction
+    group: GroupFit | None  # code the column standardized within a group
+    booster: lgb.Booster | None  # None when the column has one class or no earlier columns
+    prior: np.ndarray | None  # class frequencies, used when there is no booster
+    class_map: np.ndarray  # coder class -> index among the classes seen in training, or -1
+    extra_mean: np.ndarray  # mean extra bits per seen class
+    extra_variance: np.ndarray
+    marginal_bits: np.ndarray  # bits of each seen class from its plain frequency
+
+    STATE_FIELDS = (
+        "code_residual",
+        "booster",
+        "prior",
+        "class_map",
+        "extra_mean",
+        "extra_variance",
+        "marginal_bits",
+    )
+
+    def to_state(self) -> dict[str, Any]:
+        state: dict[str, Any] = {field: getattr(self, field) for field in self.STATE_FIELDS}
+        state["coder"] = self.coder.to_state()
+        state["linear"] = None if self.linear is None else vars(self.linear)
+        state["group"] = None if self.group is None else vars(self.group)
+        return state
+
+    @classmethod
+    def from_state(cls, state: dict[str, Any]) -> ColumnModel:
+        return cls(
+            coder=ColumnCoder.from_state(state["coder"]),
+            linear=None if state["linear"] is None else LinearFit(**state["linear"]),
+            group=None if state["group"] is None else GroupFit(**state["group"]),
+            **{field: state[field] for field in cls.STATE_FIELDS},
         )
-        if self.categorical:
-            order = np.argsort(-cnt)
-            top = uniq[order][:40]
-            self.atoms = {float(a): i + 1 for i, a in enumerate(top)}
-            rest_vals, rest_cnt = uniq[order][40:], cnt[order][40:]
-            self.other_class = len(top) + 1
-            tot = rest_cnt.sum()
-            self.other_cost = {
-                float(a): -np.log2(c / tot) for a, c in zip(rest_vals, rest_cnt)
-            }
-            self.n_classes = len(top) + 2
-            return self
-        # numeric: frequent exact values become their own classes ("atoms")
-        freq = cnt / len(v)
-        atom_vals = uniq[freq >= 0.01][:20]
-        self.atoms = {float(a): i + 1 for i, a in enumerate(atom_vals)}
-        rest = v[~np.isin(v, atom_vals)]
-        if len(np.unique(rest)) < 30:              # too little left to bin: treat as categorical
-            self.categorical = True
-            order = np.argsort(-cnt)
-            top = uniq[order][:40]
-            self.atoms = {float(a): i + 1 for i, a in enumerate(top)}
-            rest_vals, rest_cnt = uniq[order][40:], cnt[order][40:]
-            self.other_class = len(top) + 1
-            tot = max(rest_cnt.sum(), 1)
-            self.other_cost = {float(a): -np.log2(c / tot) for a, c in zip(rest_vals, rest_cnt)}
-            self.n_classes = len(top) + 2
-            return self
-        edges = np.unique(np.quantile(rest, np.linspace(0.005, 0.995, 25)))
-        self.edges = edges
-        base = len(atom_vals) + 1
-        self.low_class = base
-        self.bin0 = base + 1
-        self.high_class = self.bin0 + len(edges) - 1
-        self.n_classes = self.high_class + 1
-        widths = np.diff(edges)
-        self.bin_cost = np.log2(np.maximum(widths / self.res, 1.0))
-        lo, hi = rest[rest < edges[0]], rest[rest > edges[-1]]
-        self.lo_scale = max(float(np.mean(edges[0] - lo)) if len(lo) else self.res, self.res)
-        self.hi_scale = max(float(np.mean(hi - edges[-1])) if len(hi) else self.res, self.res)
-        return self
 
-    def transform(self, x):
-        """Returns (class index, within-class bits)."""
-        n = len(x)
-        cls = np.zeros(n, dtype=np.int32)       # class 0 = null
-        extra = np.zeros(n)
-        isnan = np.isnan(x)
-        atom_keys = np.array(list(self.atoms.keys()))
-        atom_ids = np.array(list(self.atoms.values()))
-        if len(atom_keys):
-            sorter = np.argsort(atom_keys)
-            pos = np.searchsorted(atom_keys[sorter], x)
-            pos = np.clip(pos, 0, len(atom_keys) - 1)
-            is_atom = (~isnan) & (atom_keys[sorter][pos] == x)
-            cls[is_atom] = atom_ids[sorter][pos[is_atom]]
-        else:
-            is_atom = np.zeros(n, dtype=bool)
-        todo = (~isnan) & (~is_atom)
-        if self.categorical:
-            cls[todo] = self.other_class
-            extra[todo] = [self.other_cost.get(float(a), ESCAPE_BITS) for a in x[todo]]
-            return cls, extra
-        xv = x[todo]
-        c = np.empty(len(xv), dtype=np.int32)
-        e = np.empty(len(xv))
-        low, high = xv < self.edges[0], xv > self.edges[-1]
-        mid = ~(low | high)
-        b = np.clip(np.searchsorted(self.edges, xv[mid], side="right") - 1, 0, len(self.edges) - 2)
-        c[mid], e[mid] = self.bin0 + b, self.bin_cost[b]
-        ln2 = np.log(2)
-        c[low] = self.low_class
-        e[low] = np.log2(self.lo_scale / self.res) + (self.edges[0] - xv[low]) / (self.lo_scale * ln2)
-        c[high] = self.high_class
-        e[high] = np.log2(self.hi_scale / self.res) + (xv[high] - self.edges[-1]) / (self.hi_scale * ln2)
-        cls[todo], extra[todo] = c, np.clip(e, 0, TAIL_CAP)
-        return cls, extra
+
+@dataclass
+class Scores:
+    """Per (row, column) results of scoring a batch."""
+
+    bits: np.ndarray  # code length of the value given the columns before it
+    excess: np.ndarray  # bits minus the code length the model expected for that row
+    variance: np.ndarray  # the model's variance of that code length
+    marginal_bits: np.ndarray  # code length from the value's plain frequency, ignoring the row
+
+    @property
+    def relationship_bits(self) -> np.ndarray:
+        """How much worse the value fits its row than it fits the column on its own."""
+        return self.bits - self.marginal_bits
 
 
 class TableModel:
-    def __init__(self, cols, res=None, context=(), threads=0):
-        self.cols, self.res, self.context = list(cols), dict(res or {}), list(context)
-        self.threads = threads or default_threads()
+    """Predicts each column from the columns before it."""
 
-    def _features(self, df, j):
-        X = df[self.context + self.cols[:j]].to_numpy(dtype=np.float64)
-        lin = self.lin[j] if j < len(self.lin) else None
-        if lin is not None:
-            mu, sd, coef = lin
-            Z = (np.nan_to_num(X, nan=0.0) - mu) / sd
-            pred = np.c_[Z, np.ones(len(Z))] @ coef
-            X = np.c_[X, pred]
-        return X
+    def __init__(self, columns: list[str], threads: int = 0) -> None:
+        self.columns = list(columns)
+        self.threads = threads or available_threads()
+        self.column_models: list[ColumnModel] = []
 
-    def _fit_linear(self, df, j):
-        """Least-squares prediction of a numeric column from earlier columns,
-        given to the trees as one extra feature (captures sums like totals)."""
-        X = np.nan_to_num(df[self.context + self.cols[:j]].to_numpy(dtype=np.float64), nan=0.0)
-        y = np.nan_to_num(df[self.cols[j]].to_numpy(dtype=np.float64), nan=0.0)
-        lo, hi = np.quantile(y, [0.001, 0.999])
-        keep = (y >= lo) & (y <= hi)
-        mu, sd = X[keep].mean(0), X[keep].std(0) + 1e-9
-        A = np.c_[(X[keep] - mu) / sd, np.ones(keep.sum())]
-        coef = np.linalg.solve(A.T @ A + 1e-8 * np.eye(A.shape[1]), A.T @ y[keep])
-        return mu, sd, coef
+    # ------------------------------------------------------------------ fitting
+    def fit(self, table: pd.DataFrame) -> TableModel:
+        """Train on a table whose columns are all numeric (see schema.TableSchema)."""
+        self.column_models = []
+        for index, name in enumerate(self.columns):
+            column_model = self._fit_column(table, index)
+            self.column_models.append(column_model)
+            log.debug(
+                "fitted %s: %d classes, %s, %s",
+                name,
+                len(column_model.extra_mean),
+                "categorical" if column_model.coder.categorical else "numeric",
+                self._coding_label(column_model),
+            )
+        return self
 
-    def _linpred(self, df, j):
-        mu, sd, coef = self.lin[j]
-        X = np.nan_to_num(df[self.context + self.cols[:j]].to_numpy(dtype=np.float64), nan=0.0)
-        return np.c_[(X - mu) / sd, np.ones(len(X))] @ coef
+    def _fit_column(self, table: pd.DataFrame, index: int) -> ColumnModel:
+        raw = self._values(table, index)
+        earlier = self._earlier(table, index)
+        coder = ColumnCoder(RESOLUTION).fit(raw)
+        can_use_earlier = not coder.categorical and index > 0
+        linear = _fit_linear(earlier, raw) if can_use_earlier else None
+        group = self._fit_group(table, index) if can_use_earlier else None
+        code_residual = False
 
-    def _fit_group(self, df, j):
-        y = df[self.cols[j]].to_numpy(dtype=np.float64)
-        ok = ~np.isnan(y)
-        best = None
-        for i in range(j):
-            g = df[self.cols[i]].to_numpy(dtype=np.float64)
-            keys = np.unique(g[~np.isnan(g)])
-            if not (5 <= len(keys) <= 300):
+        if group is not None:
+            target = group.standardize(raw, self._values(table, group.column_index))
+            coder = ColumnCoder(RESOLUTION).fit(target)
+        elif linear is not None:
+            residual = _round_to_resolution(raw - linear.predict(earlier))
+            residual_coder = ColumnCoder(RESOLUTION).fit(residual)
+            if _marginal_bits_per_value(residual_coder, residual) < _marginal_bits_per_value(
+                coder, raw
+            ):
+                coder, code_residual, target = residual_coder, True, residual
+            else:
+                target = raw
+        else:
+            target = raw
+
+        classes, extra_bits = coder.transform(target)
+        seen = np.unique(classes)
+        class_map = -np.ones(coder.n_classes, dtype=np.int32)
+        class_map[seen] = np.arange(len(seen))
+        labels = class_map[classes]
+        extra_mean = np.array([extra_bits[labels == k].mean() for k in range(len(seen))])
+        extra_variance = np.array([extra_bits[labels == k].var() for k in range(len(seen))])
+        smoothed_counts = np.bincount(labels, minlength=len(seen)) + 0.5
+        frequencies = smoothed_counts / smoothed_counts.sum()
+
+        features = _with_prediction(earlier, linear)
+        booster, prior = None, None
+        if len(seen) == 1 or features.shape[1] == 0:
+            prior = frequencies
+        else:
+            booster = self._train_booster(features, labels, n_classes=len(seen))
+
+        return ColumnModel(
+            coder=coder,
+            linear=linear,
+            code_residual=code_residual,
+            group=group,
+            booster=booster,
+            prior=prior,
+            class_map=class_map,
+            extra_mean=extra_mean,
+            extra_variance=extra_variance,
+            marginal_bits=-np.log2(frequencies),
+        )
+
+    def _train_booster(self, features: np.ndarray, labels: np.ndarray, n_classes: int):
+        n_validation = max(len(labels) // VALIDATION_SHARE, 1)
+        train = lgb.Dataset(features[:-n_validation], labels[:-n_validation])
+        validation = lgb.Dataset(features[-n_validation:], labels[-n_validation:], reference=train)
+        params = dict(LIGHTGBM_PARAMS, num_class=n_classes, num_threads=self.threads)
+        return lgb.train(
+            params,
+            train,
+            num_boost_round=BOOSTING_ROUNDS,
+            valid_sets=[validation],
+            callbacks=[lgb.early_stopping(EARLY_STOPPING_ROUNDS, verbose=False)],
+        )
+
+    def _fit_group(self, table: pd.DataFrame, index: int) -> GroupFit | None:
+        """Find the earlier column whose values best explain this one, if any does well enough."""
+        values = self._values(table, index)
+        present = ~np.isnan(values)
+        best: tuple[float, int, np.ndarray] | None = None
+        for candidate in range(index):
+            keys = self._values(table, candidate)
+            distinct = np.unique(keys[~np.isnan(keys)])
+            if not (GROUP_MIN_KEYS <= len(distinct) <= GROUP_MAX_KEYS):
                 continue
-            m = ok & ~np.isnan(g)
-            if m.sum() < 100:
+            usable = present & ~np.isnan(keys)
+            if usable.sum() < GROUP_MIN_ROWS:
                 continue
-            idx = np.searchsorted(keys, g[m])
-            cnt = np.bincount(idx, minlength=len(keys)).astype(float)
-            mean = np.bincount(idx, weights=y[m], minlength=len(keys)) / np.maximum(cnt, 1)
-            eta2 = float(np.sum(cnt * (mean - y[m].mean()) ** 2) / max(np.sum((y[m] - y[m].mean()) ** 2), 1e-12))
-            if eta2 > 0.5 and (best is None or eta2 > best[0]):
-                best = (eta2, i, keys)
+            eta_squared = _eta_squared(values[usable], np.searchsorted(distinct, keys[usable]))
+            if eta_squared > GROUP_MIN_ETA_SQUARED and (best is None or eta_squared > best[0]):
+                best = (eta_squared, candidate, distinct)
         if best is None:
             return None
-        _, i, keys = best
-        g = df[self.cols[i]].to_numpy(dtype=np.float64)
-        table = {}
-        for k in keys:
-            v = y[ok & (g == k)]
-            if len(v) >= 5:
-                q1, med, q3 = np.quantile(v, [0.25, 0.5, 0.75])
-                table[float(k)] = (med, max((q3 - q1) / 1.349, 1e-9))
-        gm = float(np.median(y[ok])); q1, q3 = np.quantile(y[ok], [0.25, 0.75])
-        return i, table, (gm, max((q3 - q1) / 1.349, 1e-9))
 
-    def _group_z(self, df, j):
-        i, table, glob = self.group[j]
-        y = df[self.cols[j]].to_numpy(dtype=np.float64)
-        g = df[self.cols[i]].to_numpy(dtype=np.float64)
-        med = np.full(len(y), glob[0]); sc = np.full(len(y), glob[1])
-        for k, (m_, s_) in table.items():
-            sel = g == k
-            med[sel], sc[sel] = m_, s_
-        return np.round((y - med) / sc, 2) + 0.0
+        _, column_index, distinct = best
+        keys = self._values(table, column_index)
+        by_key = {}
+        for key in distinct:
+            in_group = values[present & (keys == key)]
+            if len(in_group) >= GROUP_MIN_ROWS_PER_KEY:
+                by_key[float(key)] = _median_and_scale(in_group)
+        return GroupFit(column_index, by_key, _median_and_scale(values[present]))
 
-    def _target(self, df, j):
-        """Values to code: the raw column, or its residual against the linear fit."""
-        if getattr(self, "group", None) and self.group[j] is not None:
-            return self._group_z(df, j)
-        y = df[self.cols[j]].to_numpy(dtype=np.float64)
-        if self.residual[j]:
-            res = self.res.get(self.cols[j], 0.01)
-            y = np.round(np.round((y - self._linpred(df, j)) / res) * res, 6) + 0.0
-        return y
+    # ------------------------------------------------------------------ scoring
+    def score(self, table: pd.DataFrame) -> Scores:
+        n_rows, n_columns = len(table), len(self.columns)
+        bits, excess, variance, marginal = (
+            np.zeros((n_rows, n_columns), np.float32) for _ in range(4)
+        )
+        row = np.arange(n_rows)
+        for index, column_model in enumerate(self.column_models):
+            classes, extra_bits = column_model.coder.transform(self._target(table, index))
+            labels = column_model.class_map[classes]
+            probabilities = np.maximum(self._predict(table, index), MIN_PROBABILITY)
+
+            class_cost = -np.log2(probabilities) + column_model.extra_mean[None, :]
+            expected = (probabilities * class_cost).sum(1)
+            second_moment = probabilities * (class_cost**2 + column_model.extra_variance[None, :])
+            cost_variance = second_moment.sum(1) - expected**2
+
+            seen = labels >= 0
+            given_row = np.full(n_rows, UNSEEN_CLASS_BITS)
+            given_row[seen] = -np.log2(probabilities[row[seen], labels[seen]])
+            alone = np.full(n_rows, UNSEEN_CLASS_BITS)
+            alone[seen] = column_model.marginal_bits[labels[seen]]
+
+            bits[:, index] = given_row + extra_bits
+            excess[:, index] = given_row + extra_bits - expected
+            variance[:, index] = np.maximum(cost_variance, 0)
+            marginal[:, index] = alone + extra_bits
+        return Scores(bits, excess, variance, marginal)
+
+    def _predict(self, table: pd.DataFrame, index: int) -> np.ndarray:
+        column_model = self.column_models[index]
+        if column_model.booster is None:
+            return np.tile(column_model.prior, (len(table), 1))
+        features = _with_prediction(self._earlier(table, index), column_model.linear)
+        predicted = column_model.booster.predict(features, num_threads=self.threads)
+        return predicted.reshape(len(table), -1)
+
+    def _target(self, table: pd.DataFrame, index: int) -> np.ndarray:
+        """What is coded: the column itself, its value within a group, or a residual."""
+        column_model = self.column_models[index]
+        values = self._values(table, index)
+        if column_model.group is not None:
+            keys = self._values(table, column_model.group.column_index)
+            return column_model.group.standardize(values, keys)
+        if column_model.code_residual:
+            prediction = column_model.linear.predict(self._earlier(table, index))
+            return _round_to_resolution(values - prediction)
+        return values
+
+    def _values(self, table: pd.DataFrame, index: int) -> np.ndarray:
+        return table[self.columns[index]].to_numpy(dtype=np.float64)
+
+    def _earlier(self, table: pd.DataFrame, index: int) -> np.ndarray:
+        return table[self.columns[:index]].to_numpy(dtype=np.float64)
 
     @staticmethod
-    def _marginal_bits(coder, y):
-        cls, extra = coder.transform(y)
-        freq = np.bincount(cls) / len(cls)
-        return float(np.mean(-np.log2(freq[cls]) + extra))
+    def _coding_label(column_model: ColumnModel) -> str:
+        if column_model.group is not None:
+            return "standardized within a group"
+        return "residual of a linear fit" if column_model.code_residual else "raw value"
 
-    def fit(self, df, rounds=40, verbose=False):
-        import time
-        self.coders, self.models, self.priors, self.lin, self.residual, self.group = [], [], [], [], [], []
-        for j, c in enumerate(self.cols):
-            t0 = time.time()
-            raw = df[c].to_numpy(dtype=np.float64)
-            coder = ColumnCoder(c, self.res.get(c, 0.01)).fit(raw)
-            self.lin.append(self._fit_linear(df, j) if (not coder.categorical and j > 0) else None)
-            self.residual.append(False)
-            self.group.append(self._fit_group(df, j) if (not coder.categorical and j > 0) else None)
-            if self.group[j] is not None:
-                coder = ColumnCoder(c, 0.01).fit(self._group_z(df, j))
-            elif self.lin[j] is not None:
-                self.residual[j] = True
-                r = self._target(df, j)
-                rcoder = ColumnCoder(c, self.res.get(c, 0.01)).fit(r)
-                if self._marginal_bits(rcoder, r) < self._marginal_bits(coder, raw):
-                    coder = rcoder
-                else:
-                    self.residual[j] = False
-            y, ex = coder.transform(self._target(df, j))
-            present = np.unique(y)
-            remap = -np.ones(coder.n_classes, dtype=np.int32)
-            remap[present] = np.arange(len(present))
-            coder.remap, coder.n_present = remap, len(present)
-            yy_ = remap[y]
-            coder.m_extra = np.array([ex[yy_ == k].mean() for k in range(len(present))])
-            coder.v_extra = np.array([ex[yy_ == k].var() for k in range(len(present))])
-            self.coders.append(coder)
-            X = self._features(df, j)
-            if len(present) == 1 or X.shape[1] == 0:
-                counts = np.bincount(remap[y], minlength=len(present)) + 0.5
-                self.models.append(None)
-                self.priors.append(counts / counts.sum())
-            else:
-                params = dict(
-                    objective="multiclass", num_class=len(present),
-                    learning_rate=0.12, num_leaves=31, min_data_in_leaf=50,
-                    lambda_l2=5.0, min_sum_hessian_in_leaf=1.0,
-                    feature_fraction=0.8, max_bin=63, verbose=-1, num_threads=self.threads,
-                    seed=0,
-                )
-                yy = remap[y]
-                nva = max(len(yy) // 8, 1)
-                dtr = lgb.Dataset(X[:-nva], yy[:-nva])
-                dva = lgb.Dataset(X[-nva:], yy[-nva:], reference=dtr)
-                m = lgb.train(params, dtr, num_boost_round=rounds, valid_sets=[dva],
-                              callbacks=[lgb.early_stopping(4, verbose=False)])
-                self.best_iter = getattr(self, "best_iter", {})
-                self.best_iter[c] = m.best_iteration
-                self.models.append(m)
-                self.priors.append(None)
-            if verbose:
-                print(f"{c:24s} classes={len(present):3d} "
-                      f"{'cat' if coder.categorical else 'num'} "
-                      f"{'group-z' if self.group[j] is not None else 'residual' if self.residual[j] else 'raw':8s} "
-                      f"rounds={getattr(self, 'best_iter', {}).get(c, 0):3d} {time.time()-t0:6.1f}s", flush=True)
-        return self
+    # ------------------------------------------------------------------ state
+    def to_state(self) -> dict[str, Any]:
+        return {
+            "columns": self.columns,
+            "column_models": [column_model.to_state() for column_model in self.column_models],
+        }
 
-    def fit_no_context(self, df):
-        """Frequency of every coded value on its own, ignoring the rest of the row."""
-        self.L0 = []
-        for j in range(len(self.cols)):
-            coder = self.coders[j]
-            idx = coder.remap[coder.transform(self._target(df, j))[0]]
-            p = np.bincount(idx[idx >= 0], minlength=coder.n_present) + 0.5
-            self.L0.append(-np.log2(p / p.sum()))
-        return self
+    @classmethod
+    def from_state(cls, state: dict[str, Any], threads: int = 0) -> TableModel:
+        model = cls(state["columns"], threads)
+        model.column_models = [ColumnModel.from_state(s) for s in state["column_models"]]
+        return model
 
-    def score(self, df):
-        """Per (row, column):
-        B  code length of the value given the columns before it (bits)
-        X  B minus the code length the model expected for that row
-        V  the model's variance of that code length
-        B0 code length of the value from its plain frequency, ignoring the row
-        """
-        n, C = len(df), len(self.cols)
-        B, X, V, B0 = (np.zeros((n, C), np.float32) for _ in range(4))
-        ar = np.arange(n)
-        for j in range(C):
-            coder = self.coders[j]
-            cls, extra = coder.transform(self._target(df, j))
-            idx = coder.remap[cls]
-            if self.models[j] is None:
-                P = np.tile(self.priors[j], (n, 1))
-            else:
-                P = self.models[j].predict(self._features(df, j), num_threads=self.threads).reshape(n, -1)
-            P = np.maximum(P, P_FLOOR)
-            cost = -np.log2(P) + coder.m_extra[None, :]
-            ecost = (P * cost).sum(1)
-            var = (P * (cost ** 2 + coder.v_extra[None, :])).sum(1) - ecost ** 2
-            seen = idx >= 0
-            s_ = np.full(n, -np.log2(P_FLOOR) + ESCAPE_BITS)
-            s_[seen] = -np.log2(P[ar[seen], idx[seen]])
-            s0 = np.full(n, -np.log2(P_FLOOR) + ESCAPE_BITS)
-            s0[seen] = self.L0[j][idx[seen]]
-            B[:, j], X[:, j], V[:, j], B0[:, j] = s_ + extra, s_ + extra - ecost, np.maximum(var, 0), s0 + extra
-        return B, X, V, B0
+
+def _fit_linear(earlier: np.ndarray, values: np.ndarray) -> LinearFit:
+    """Ridge-stabilized least squares on rows inside the trim quantiles.
+
+    The prediction is given to the trees as one more feature, which lets them learn exact
+    arithmetic relationships such as total = price * quantity + tax.
+    """
+    features = np.nan_to_num(earlier, nan=0.0)
+    target = np.nan_to_num(values, nan=0.0)
+    low, high = np.quantile(target, TRIM_QUANTILES)
+    keep = (target >= low) & (target <= high)
+    mean = features[keep].mean(0)
+    scale = features[keep].std(0) + 1e-9
+    design = np.c_[(features[keep] - mean) / scale, np.ones(keep.sum())]
+    gram = design.T @ design + 1e-8 * np.eye(design.shape[1])
+    return LinearFit(mean, scale, np.linalg.solve(gram, design.T @ target[keep]))
+
+
+def _with_prediction(earlier: np.ndarray, linear: LinearFit | None) -> np.ndarray:
+    return earlier if linear is None else np.c_[earlier, linear.predict(earlier)]
+
+
+def _round_to_resolution(values: np.ndarray) -> np.ndarray:
+    return np.round(np.round(values / RESOLUTION) * RESOLUTION, 6) + 0.0
+
+
+def _marginal_bits_per_value(coder: ColumnCoder, values: np.ndarray) -> float:
+    """Average bits per value when each class is coded by its plain frequency."""
+    classes, extra_bits = coder.transform(values)
+    frequency = np.bincount(classes) / len(classes)
+    return float(np.mean(-np.log2(frequency[classes]) + extra_bits))
+
+
+def _eta_squared(values: np.ndarray, group_index: np.ndarray) -> float:
+    """Share of the variance of `values` explained by group membership."""
+    n_groups = int(group_index.max()) + 1
+    counts = np.bincount(group_index, minlength=n_groups).astype(float)
+    sums = np.bincount(group_index, weights=values, minlength=n_groups)
+    group_means = sums / np.maximum(counts, 1)
+    overall_mean = values.mean()
+    between = np.sum(counts * (group_means - overall_mean) ** 2)
+    total = max(np.sum((values - overall_mean) ** 2), 1e-12)
+    return float(between / total)
+
+
+def _median_and_scale(values: np.ndarray) -> tuple[float, float]:
+    """Median and a robust standard deviation (from the interquartile range)."""
+    first_quartile, third_quartile = np.quantile(values, [0.25, 0.75])
+    scale = max((third_quartile - first_quartile) / IQR_TO_SIGMA, 1e-9)
+    return float(np.median(values)), float(scale)

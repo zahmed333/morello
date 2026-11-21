@@ -1,7 +1,9 @@
-# Experiments behind RESULTS.md
+# Experiments behind docs/results.md
 
 These scripts are research code. They are kept so the numbers can be reproduced; they are not
-part of the installed package.
+part of the installed package. They are excluded from linting and from the tests.
+`package_test/` was written against Morello 0.1 and uses names that have since changed (see
+`CHANGELOG.md`).
 
 ## Data (public, not stored in this repo)
 
@@ -11,7 +13,7 @@ part of the installed package.
   month saved as `ems_2024-MM.csv`
 - Synthea 10k synthetic patients (COVID-19 sample), CSV export
 
-## Controlled experiment (sections 1 and 2 of RESULTS.md)
+## Controlled experiment (sections 1 and 2 of docs/results.md)
 
     python3 dump.py  ds_taxi <raw dir> <work dir> holdout   # scores clean and corrupted days, resumable
     python3 dump0.py ds_taxi <raw dir> <work dir> holdout   # no-context code lengths
@@ -24,7 +26,7 @@ detection tables. `competitors/` exports the same batches and runs NannyML on th
 ## Package test on raw files (section 3)
 
     pip install .
-    MORELLO_DATA=<dir with taxi/ and ems/> python3 experiments/package_test/real_test.py taxi out/
+    MORELLO_DATA=<dir with taxi/ and ems/> python3 research/package_test/real_test.py taxi out/
 
 ## Protocol in brief
 

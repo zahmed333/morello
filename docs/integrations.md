@@ -25,10 +25,12 @@ table that any other tool can read.
 ```python
 from morello.table import fit_table, check_table, accept_batch
 
-fit_table(conn, "analytics.orders", batch_col="order_ts", store="s3://bucket/morello",
-          slice_col="country")                                  # once, and again every few months
-reports = check_table(conn, "s3://bucket/morello", table="analytics.orders",
-                      results_table="ops.morello_results")    # after every load
+fit_table(
+    conn, "analytics.orders", batch_col="order_ts", store="s3://bucket/morello", slice_col="country"
+)  # once, and again every few months
+reports = check_table(
+    conn, "s3://bucket/morello", table="analytics.orders", results_table="ops.morello_results"
+)  # after every load
 ```
 
 `conn` can be a DuckDB connection, a SparkSession, a Snowpark session, a SQLAlchemy engine or URL,
@@ -44,9 +46,9 @@ distinct values (a load id, an hour bucket you computed, a file name).
 
 ## Command line
 
-    python -m morello fit-table   --url snowflake://... --table analytics.orders --batch-col order_ts --store s3://bucket/morello
-    python -m morello check-table --url snowflake://... --table analytics.orders --store s3://bucket/morello --results-table ops.morello_results
-    python -m morello accept      --url snowflake://... --table analytics.orders --store s3://bucket/morello --batch 2024-05-01
+    morello fit-table   --url snowflake://... --table analytics.orders --batch-col order_ts --store s3://bucket/morello
+    morello check-table --url snowflake://... --table analytics.orders --store s3://bucket/morello --results-table ops.morello_results
+    morello accept      --url snowflake://... --table analytics.orders --store s3://bucket/morello --batch 2024-05-01
 
 `check-table` exits with code 1 on an alert, which is enough for cron, GitHub Actions, Airflow's
 BashOperator and most schedulers.
@@ -54,17 +56,21 @@ BashOperator and most schedulers.
 ## Spark and Databricks
 
 ```python
-from morello.integrations import spark as tbs
+from morello.integrations import spark as morello_spark
 
-tbs.fit(spark, "main.sales.orders", "order_ts", state_table="main.ops.morello_state")
-reports = tbs.check(spark, "main.sales.orders", state_table="main.ops.morello_state",
-                    results_table="main.ops.morello_results")
-tbs.fail_on_alert(reports)        # raises, which fails the job or workflow task
+morello_spark.fit(spark, "main.sales.orders", "order_ts", state_table="main.ops.morello_state")
+reports = morello_spark.check(
+    spark,
+    "main.sales.orders",
+    state_table="main.ops.morello_state",
+    results_table="main.ops.morello_results",
+)
+morello_spark.fail_on_alert(reports)  # raises, which fails the job or workflow task
 ```
 
 `fit_dataframe` and `check_dataframe` do the same for a DataFrame that is not a table.
 
-Large samples: `tbs.fit(..., score_rows=1_000_000)` scores a million rows per batch on the
+Large samples: `morello_spark.fit(..., score_rows=1_000_000)` scores a million rows per batch on the
 executors and sends back only sums and counts. Use the same `score_rows` for fitting and checking.
 
 ## Snowflake
@@ -82,10 +88,16 @@ test that fails the build on an alert.
 # models/orders_quality.py
 from morello.integrations.dbt import run
 
+
 def model(dbt, session):
     dbt.config(materialized="table")
-    return run(session, dbt.ref("orders"), name="orders", batch_col="order_ts",
-               state_table=f"{dbt.this.schema}.morello_state")
+    return run(
+        session,
+        dbt.ref("orders"),
+        name="orders",
+        batch_col="order_ts",
+        state_table=f"{dbt.this.schema}.morello_state",
+    )
 ```
 
 ```yaml

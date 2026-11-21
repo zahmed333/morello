@@ -3,8 +3,8 @@
 // morello itself runs as a Python step (a Databricks workflow task, spark-submit of a .py file, or a
 // notebook cell) that writes one row per checked batch to a results table:
 //
-//     from morello.integrations import spark as tbs
-//     tbs.check(spark, "catalog.sales.orders", state_table="ops.morello_state",
+//     from morello.integrations import spark as morello_spark
+//     morello_spark.check(spark, "catalog.sales.orders", state_table="ops.morello_state",
 //               results_table="ops.morello_results")
 //
 // A Scala job that runs afterwards reads that table and stops if the newest batch alerted.

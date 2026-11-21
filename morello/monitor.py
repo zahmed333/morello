@@ -1,361 +1,394 @@
 """Monitor: learn what normal batches of a table look like, then check new batches."""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from dataclasses import asdict, dataclass, field
+from typing import Any
+
 import numpy as np
 import pandas as pd
 
-from .model import TableModel, ColumnCoder
-from .schema import Schema, as_datetime
+from . import state
+from .checks import WHOLE_ROW, BatchChecks, Statistics
+from .history import HistoryEntry, SegmentHistory, deviation_from, is_weekend
+from .model import Scores, TableModel
+from .report import ALERT, OK, WARMING_UP, Alert, Report
+from .schema import TableSchema, as_datetime
+from .store import Store, open_store
 
-WHOLE_ROW = "<whole row>"
-TROW = (0, 5, 10, 20)
+log = logging.getLogger(__name__)
 
-
-def _batch_keys(s, freq="D"):
-    """Batch key per row: calendar period for datetime-like columns, the value itself otherwise."""
-    dt = as_datetime(s)
-    if dt is not None:
-        return dt.dt.to_period(freq).astype(str).where(dt.notna())
-    return s.astype(str).where(s.notna())
-
-
-def _is_weekend(key):
-    try:
-        return bool(pd.Timestamp(key).dayofweek >= 5)
-    except Exception:
-        return None
+MIN_FIT_BATCHES = 20  # batches of history needed to train and calibrate
+WHOLE_TABLE = ""  # the segment name of the table as a whole
+UPDATE_MODES = ("auto", "always", "never")
+MAX_ALERT_RATIO = 1e6
+EXAMPLE_ROWS, EXAMPLE_COLUMNS, EXAMPLE_FIELDS = 3, 2, 7
 
 
-def merge_stats(parts):
-    """Add up statistics computed on separate chunks of one batch."""
-    parts = [p for p in parts if p]
-    if not parts:
-        return {}
-    return {k: sum(np.asarray(p[k], dtype=float) for p in parts) for k in parts[0]}
+@dataclass
+class TableConfig:
+    """How a monitor reads its table in a warehouse. Set by morello.table.fit_table."""
+
+    table: str
+    batch_col: str
+    as_date: bool = True
+    where: str | None = None
+    slice_col: str | None = None
+    slices: list[str] = field(default_factory=list)
+    slice_sample_rows: int = 2000
+    score_rows: int | None = None
 
 
-class Report:
-    def __init__(self, batch, status, n_rows, alerts, suspects, examples, skipped, history_len, segment=""):
-        self.batch, self.status, self.n_rows = batch, status, n_rows
-        self.alerts, self.suspects, self.examples = alerts, suspects, examples
-        self.skipped, self.history_len, self.segment = skipped, history_len, segment
-        self._entry = None
-
-    @property
-    def alert(self):
-        return self.status == "alert"
-
-    def to_dict(self):
-        return dict(batch=self.batch, segment=self.segment, status=self.status, rows_checked=self.n_rows,
-                    alerts=self.alerts, suspect_columns=self.suspects, examples=self.examples,
-                    history_batches=self.history_len)
-
-    def text(self, color=False):
-        """The report as text. color=True adds terminal colour codes (see morello.term)."""
-        from .term import paint
-        c = lambda t, style: paint(t, style, color)
-        seg = f" [{self.segment}]" if self.segment else ""
-        word = c(self.status.upper().replace("_", " "), self.status)
-        head = f"batch {self.batch}{seg}: {word} ({self.n_rows} rows checked, {self.history_len} batches of history)"
-        if self.status == "warming_up":
-            return head + "\n  not enough history yet to alert reliably"
-        if not self.alerts:
-            return head
-        lines = [head, "  suspect columns: " + ", ".join(c(s, "bold") for s in self.suspects[:5])]
-        for a in self.alerts[:8]:
-            lines.append(f"  - {a['check']} | {c(a['column'], 'bold')}: {a['value']:.4g} (usual {a['usual']:.4g}), "
-                         f"{c('%.1fx' % a['ratio'], 'bold')} the largest change seen before")
-        for col, rows in self.examples.items():
-            lines.append(f"  example rows for {c(col, 'bold')}:")
-            for r in rows:
-                lines.append(c("    " + ", ".join(f"{k}={v}" for k, v in r.items()), "dim"))
-        return "\n".join(lines)
+def batch_keys(column: pd.Series, freq: str = "D") -> pd.Series:
+    """Batch key per row: the calendar period for datetime columns, the value itself otherwise."""
+    as_dates = as_datetime(column)
+    if as_dates is not None:
+        return as_dates.dt.to_period(freq).astype(str).where(as_dates.notna())
+    return column.astype(str).where(column.notna())
 
 
 class Monitor:
-    """
-    margin       a check alerts when its change exceeds margin x the largest change seen on earlier clean batches
-    window       number of recent batches that define "usual"
-    sample_rows  rows scored per batch (larger batches are sampled). Keep it the same for
-                 calibration and checking: how much a check normally moves depends on it.
+    """Learns a table from clean history and checks new batches against it.
+
+    margin          a check alerts when it moves more than margin x the largest change seen on
+                    any earlier clean batch
+    window          recent clean batches that define what a check usually reads
+    min_history     clean batches needed before alerts switch on
+    sample_rows     rows scored per batch; larger batches are sampled. Keep it the same for
+                    calibration and checking, because how much a check moves depends on it
+    max_train_rows  rows used to train the model
+    max_categories  distinct values kept per text column
+    threads         CPU threads for training and scoring; 0 uses all available cores
+    seed            seed for row sampling
     """
 
-    def __init__(self, margin=3.0, window=28, min_history=14, sample_rows=5000, max_train_rows=150_000,
-                 max_categories=300, threads=0, seed=0):
-        self.margin, self.window, self.min_history = margin, window, min_history
-        self.sample_rows, self.max_train_rows = sample_rows, max_train_rows
-        self.max_categories, self.threads, self.seed = max_categories, threads, seed
-        self.histories, self.runmax, self.n_valid = {}, {}, {}
-        self.batch_col, self.freq, self.table_cfg, self.cursor = None, "D", {}, {}
+    def __init__(
+        self,
+        margin: float = 3.0,
+        window: int = 28,
+        min_history: int = 14,
+        sample_rows: int = 5000,
+        max_train_rows: int = 150_000,
+        max_categories: int = 300,
+        threads: int = 0,
+        seed: int = 0,
+    ) -> None:
+        self.margin = margin
+        self.window = window
+        self.min_history = min_history
+        self.sample_rows = sample_rows
+        self.max_train_rows = max_train_rows
+        self.max_categories = max_categories
+        self.threads = threads
+        self.seed = seed
 
-    @property
-    def history(self):
-        return self.histories.get("", [])
+        # set by fit_model
+        self.model_id = ""
+        self.batch_col: str | None = None
+        self.freq = "D"
+        self.schema = TableSchema(max_categories)
+        self.model = TableModel([], threads)
+        self.checks = BatchChecks([])
+        self.table_config: TableConfig | None = None
+
+        # changes after every check
+        self.histories: dict[str, SegmentHistory] = {}
+        self.last_checked: str | None = None  # last batch a table run has processed
 
     # ------------------------------------------------------------------ fitting
-    def fit(self, df, batch_col, freq="D", train_fraction=0.5, verbose=False):
+    def fit(
+        self, table: pd.DataFrame, batch_col: str, freq: str = "D", train_fraction: float = 0.5
+    ) -> Monitor:
         """Learn from a history table that is believed to be clean.
 
-        The earliest `train_fraction` of batches trains the model; the remaining batches are
-        scored out-of-sample to learn how much every check normally moves."""
-        keys = _batch_keys(df[batch_col], freq)
-        df = df[keys.notna()]; keys = keys[keys.notna()]
-        order = sorted(keys.unique())
-        if len(order) < 20:
-            raise ValueError(f"need at least 20 batches of history to calibrate alerts, got {len(order)}")
-        n_train = max(1, int(len(order) * train_fraction))
-        self.fit_model(df[keys.isin(set(order[:n_train]))], batch_col, freq, verbose)
-        for k in order[n_train:]:
-            self.calibrate(df[keys == k], batch=k)
+        The earliest `train_fraction` of batches trains the model. The remaining batches are
+        scored out-of-sample, in order, to learn how much every check normally moves.
+        """
+        keys = batch_keys(table[batch_col], freq)
+        table, keys = table[keys.notna()], keys[keys.notna()]
+        batches = sorted(keys.unique())
+        if len(batches) < MIN_FIT_BATCHES:
+            raise ValueError(
+                f"need at least {MIN_FIT_BATCHES} batches of history to calibrate alerts, "
+                f"got {len(batches)}"
+            )
+        n_train = max(1, int(len(batches) * train_fraction))
+        self.fit_model(table[keys.isin(set(batches[:n_train]))], batch_col, freq)
+        for batch in batches[n_train:]:
+            self.calibrate(table[keys == batch], batch=batch)
         return self
 
-    def fit_model(self, train, batch_col=None, freq="D", verbose=False):
-        """Train the model on rows from the training batches. Follow with calibrate() per later batch."""
+    def fit_model(
+        self, train: pd.DataFrame, batch_col: str | None = None, freq: str = "D"
+    ) -> Monitor:
+        """Train on rows from the training batches. Follow with calibrate() for later batches."""
         self.batch_col, self.freq = batch_col, freq
         if len(train) > self.max_train_rows:
             train = train.sample(self.max_train_rows, random_state=self.seed)
         train = train.sample(frac=1.0, random_state=self.seed)
-        exclude = []
-        if batch_col is not None and batch_col in train.columns:
-            dt = as_datetime(train[batch_col])
-            has_time = dt is not None and bool((dt.dt.hour != 0).any())      # keep time-of-day as a column
-            exclude = [] if has_time else [batch_col]
-        self.schema = Schema(self.max_categories).fit(train, exclude=exclude)
-        enc = self.schema.transform(train)
-        self.cols = list(self.schema.features)
-        self.model = TableModel(self.cols, threads=self.threads).fit(enc, verbose=verbose).fit_no_context(enc)
-        self._fit_standard(enc)
-        self._build_meta()
-        self.histories, self.runmax, self.n_valid = {}, {}, {}
+
+        self.schema = TableSchema(self.max_categories).fit(
+            train, exclude=self._columns_to_exclude(train)
+        )
+        encoded = self.schema.transform(train)
+        self.model = TableModel(self.schema.features, self.threads).fit(encoded)
+        self.checks = BatchChecks(self.schema.features).fit(encoded)
+        self.model_id = uuid.uuid4().hex
+        self.histories, self.last_checked = {}, None
+        log.info(
+            "trained on %d rows, %d columns; skipped %s",
+            len(train),
+            len(self.columns),
+            self.schema.skipped or "none",
+        )
         return self
 
-    def calibrate(self, df, batch, segment=""):
+    def _columns_to_exclude(self, train: pd.DataFrame) -> list[str]:
+        """The batch column is left out of the model unless it also carries a time of day."""
+        if self.batch_col is None or self.batch_col not in train.columns:
+            return []
+        as_dates = as_datetime(train[self.batch_col])
+        has_time_of_day = as_dates is not None and bool((as_dates.dt.hour != 0).any())
+        return [] if has_time_of_day else [self.batch_col]
+
+    def calibrate(self, table: pd.DataFrame, batch: str, segment: str = WHOLE_TABLE) -> Report:
         """Record a clean batch so the monitor learns how much every check normally moves."""
-        return self.check(df, batch=batch, update="always", segment=segment)
-
-    @property
-    def batches_until_ready(self):
-        """Clean batches still needed before alerts are switched on."""
-        return max(0, self.min_history - self.n_valid.get("", 0))
-
-    def _fit_standard(self, enc):
-        self.raw, self.hist0, self.lo, self.hi, self.seen, self.digits = {}, {}, {}, {}, {}, {}
-        for c in self.cols:
-            x = enc[c].to_numpy(dtype=float)
-            coder = ColumnCoder(c, 0.01).fit(x)
-            cls, _ = coder.transform(x)
-            self.raw[c] = coder
-            self.hist0[c] = np.bincount(cls, minlength=coder.n_classes) / len(cls)
-            v = x[np.isfinite(x)]
-            self.lo[c], self.hi[c] = (float(np.quantile(v, 0.001)), float(np.quantile(v, 0.999))) if len(v) else (0.0, 0.0)
-            self.seen[c] = np.unique(v)
-            if not coder.categorical:
-                p = np.bincount(np.mod(np.round(v / 0.01), 100).astype(int), minlength=100) + 0.5
-                p = p / p.sum(); L = -np.log2(p)
-                self.digits[c] = (L, float((p * L).sum()))
-
-    def _build_meta(self):
-        """One entry per check: (name, column, counts only increases, is a rate)."""
-        m = []
-        for c in self.cols:
-            m.append(("surprise", c, True, False))
-        m.append(("extreme values", WHOLE_ROW, True, True))
-        for c in self.cols:
-            m.append(("extreme values", c, True, True))
-        for c in self.digits:
-            m.append(("digit pattern", c, False, False))
-        for label in ("broken relationship", "broken relationship (strong)"):
-            m.append((label, WHOLE_ROW, True, True))
-            for c in self.cols:
-                m.append((label, c, True, True))
-        for t in TROW:
-            m.append((f"rows contradicting their own columns (> {t} bits)", WHOLE_ROW, True, True))
-        for c in self.cols:
-            m.append(("null rate", c, False, True))
-            m.append(("unexpected values", c, True, True))
-            m.append(("distribution shift", c, True, False))
-            if self.raw[c].categorical:
-                for k in np.argsort(-self.hist0[c])[:5]:
-                    m.append((f"category share #{k}", c, False, True))
-            else:
-                m += [("mean", c, False, False), ("spread", c, False, False), ("median", c, False, False),
-                      ("zero rate", c, False, True)]
-        m.append(("duplicate rows", WHOLE_ROW, True, True))
-        self.meta = [tuple(x) for x in m]
-        self.up = np.array([x[2] for x in m]); self.rate = np.array([x[3] for x in m])
-
-    # ------------------------------------------------------------------ statistics
-    def stats(self, enc):
-        """Additive statistics of a chunk of encoded rows (sums and counts only), so chunks scored
-        on different machines can be added together. Also returns per-row detail for examples."""
-        B, X, V, B0 = self.model.score(enc)
-        LLR = B - B0; Trow = LLR.sum(1)
-        st = {"n": np.array([len(enc)], dtype=float),
-              "sx": X.sum(0, dtype=np.float64), "sv": V.sum(0, dtype=np.float64),
-              "t10": np.r_[(X.max(1) > 10).sum(), (X > 10).sum(0)].astype(float),
-              "lr6": np.r_[(LLR.max(1) > 6).sum(), (LLR > 6).sum(0)].astype(float),
-              "lr10": np.r_[(LLR.max(1) > 10).sum(), (LLR > 10).sum(0)].astype(float),
-              "trow": np.array([(Trow > t).sum() for t in TROW], dtype=float)}
-        dsum, dn = [], []
-        for c, (L, H) in self.digits.items():
-            v = enc[c].to_numpy(dtype=float); ok = np.isfinite(v)
-            dsum.append(float((L[np.mod(np.round(v[ok] / 0.01), 100).astype(int)] - H).sum())); dn.append(ok.sum())
-        st["dsum"], st["dn"] = np.array(dsum, dtype=float), np.array(dn, dtype=float)
-        nok, nbad, s1, s2, nzero = [], [], [], [], []
-        for c in self.cols:
-            x = enc[c].to_numpy(dtype=float); ok = np.isfinite(x); coder = self.raw[c]
-            cls, _ = coder.transform(x)
-            st[f"h|{c}"] = np.bincount(cls, minlength=coder.n_classes).astype(float)
-            nok.append(ok.sum())
-            if coder.categorical:
-                nbad.append((~np.isin(x[ok], self.seen[c])).sum()); s1.append(0.0); s2.append(0.0); nzero.append(0.0)
-            else:
-                v = x[ok]
-                nbad.append(((v < self.lo[c]) | (v > self.hi[c])).sum())
-                s1.append(v.sum()); s2.append((v * v).sum()); nzero.append((v == 0).sum())
-        for k, a in (("nok", nok), ("nbad", nbad), ("s1", s1), ("s2", s2), ("nzero", nzero)):
-            st[k] = np.array(a, dtype=float)
-        return st, (X, LLR)
-
-    def extras(self, enc):
-        """The two statistics that cannot be added across chunks; computed on one sample."""
-        med = [float(np.nanmedian(enc[c].to_numpy(dtype=float))) if enc[c].notna().any() else np.nan
-               for c in self.cols if not self.raw[c].categorical]
-        return {"median": np.array(med, dtype=float), "dup": float(enc.duplicated().mean()) if len(enc) else 0.0}
-
-    def metrics_from(self, st, ex):
-        n = max(float(st["n"][0]), 1.0)
-        out = list(st["sx"] / np.sqrt(st["sv"] + 1e-6))
-        out += list(st["t10"] / n)
-        out += list(np.where(st["dn"] > 0, st["dsum"] / np.maximum(st["dn"], 1), 0.0))
-        out += list(st["lr6"] / n) + list(st["lr10"] / n) + list(st["trow"] / n)
-        im = 0
-        for j, c in enumerate(self.cols):
-            h = st[f"h|{c}"] / n; p0 = self.hist0[c]; nok = st["nok"][j]
-            out += [1 - nok / n, st["nbad"][j] / nok if nok else 0.0,
-                    float(np.sum((h - p0) * np.log((h + 1e-4) / (p0 + 1e-4))))]
-            if self.raw[c].categorical:
-                out += [h[k] for k in np.argsort(-p0)[:5]]
-            else:
-                mean = st["s1"][j] / nok if nok else np.nan
-                var = st["s2"][j] / nok - mean * mean if nok else np.nan
-                out += [mean, float(np.sqrt(max(var, 0.0))) if nok else np.nan, ex["median"][im],
-                        st["nzero"][j] / nok if nok else np.nan]
-                im += 1
-        out.append(ex["dup"])
-        return np.array(out, dtype=float)
-
-    def _usual(self, weekend, segment):
-        hist = self.histories.get(segment, [])[-self.window:]
-        if len(hist) < 10:
-            return None
-        same = [h for h in hist if h["weekend"] == weekend]
-        use = same if (weekend is not None and len(same) >= 3) else hist
-        return np.nanmedian(np.array([h["metrics"] for h in use]), axis=0)
+        return self.check(table, batch=batch, update="always", segment=segment)
 
     # ------------------------------------------------------------------ checking
-    def check(self, df, batch=None, update="auto", segment=""):
-        """Check one batch. update: 'auto' adds the batch to history when it does not alert,
-        'always' adds it regardless, 'never' leaves history unchanged."""
-        if batch is None and self.batch_col in df.columns:
-            k = _batch_keys(df[self.batch_col], self.freq).dropna()
-            batch = k.iloc[0] if len(k) else "?"
-        if len(df) > self.sample_rows:
-            df = df.sample(self.sample_rows, random_state=self.seed)
-        enc = self.schema.transform(df)
-        st, detail = self.stats(enc)
-        return self.evaluate(st, self.extras(enc), batch, update, segment, df=df, detail=detail)
+    def check(
+        self,
+        table: pd.DataFrame,
+        batch: str | None = None,
+        update: str = "auto",
+        segment: str = WHOLE_TABLE,
+    ) -> Report:
+        """Check one batch.
 
-    def evaluate(self, st, ex, batch, update="auto", segment="", df=None, detail=None):
-        """Turn statistics into a report. Use directly when statistics were computed elsewhere
-        (for example on a Spark cluster); df and detail, if given, supply example rows."""
-        batch = str(batch); n_rows = int(st["n"][0])
-        m = self.metrics_from(st, ex)
-        weekend = _is_weekend(batch)
-        usual = self._usual(weekend, segment)
-        entry = dict(batch=batch, weekend=weekend, metrics=m, dev=None, segment=segment)
-        alerts, suspects, examples, status = [], [], {}, "warming_up"
+        update  "auto" learns the batch when it does not alert, "always" learns it regardless,
+                "never" leaves the monitor unchanged.
+        """
+        if batch is None and self.batch_col in table.columns:
+            keys = batch_keys(table[self.batch_col], self.freq).dropna()
+            batch = keys.iloc[0] if len(keys) else None
+        if len(table) > self.sample_rows:
+            table = table.sample(self.sample_rows, random_state=self.seed)
+        encoded = self.schema.transform(table)
+        stats, scores = self.statistics(encoded)
+        sample = self.checks.sample_statistics(encoded)
+        return self.evaluate(stats, sample, batch, update, segment, rows=table, scores=scores)
+
+    def statistics(self, encoded: pd.DataFrame) -> tuple[Statistics, Scores]:
+        """Additive statistics of a chunk of encoded rows, and the per-row scores behind them."""
+        scores = self.model.score(encoded)
+        return self.checks.statistics(encoded, scores), scores
+
+    def evaluate(
+        self,
+        stats: Statistics,
+        sample: Statistics,
+        batch: str | None,
+        update: str = "auto",
+        segment: str = WHOLE_TABLE,
+        rows: pd.DataFrame | None = None,
+        scores: Scores | None = None,
+    ) -> Report:
+        """Turn statistics into a report.
+
+        Use this directly when the statistics were computed elsewhere, for example on a Spark
+        cluster. `rows` and `scores`, when given, supply example rows for the report.
+        """
+        if update not in UPDATE_MODES:
+            raise ValueError(f"update must be one of {UPDATE_MODES}, got {update!r}")
+        batch = None if batch is None else str(batch)
+        rows_checked = int(stats["rows"][0])
+        metrics = self.checks.metrics(stats, sample)
+        history = self.histories.get(segment, SegmentHistory())
+        weekend = is_weekend(batch)
+        usual = history.usual(weekend, self.window)
+
+        entry = HistoryEntry(batch=batch, weekend=weekend, metrics=metrics, deviation=None)
+        report = Report(
+            batch=batch,
+            status=WARMING_UP,
+            rows_checked=rows_checked,
+            history_batches=len(history.entries),
+            segment=segment,
+            skipped_columns=dict(self.schema.skipped),
+            history_entry=entry,
+        )
         if usual is not None:
-            d = m - usual
-            dev = np.nan_to_num(np.where(self.up, np.maximum(d, 0), np.abs(d)), nan=0.0)
-            entry["dev"] = dev
-            if self.n_valid.get(segment, 0) >= self.min_history:
-                base = np.maximum(self.runmax[segment], np.where(self.rate, 3.0 / max(n_rows, 1), 0.0)) + 1e-12
-                ratio = dev / base
-                hit = np.where(ratio > self.margin)[0]
-                status = "alert" if len(hit) else "ok"
-                for i in hit[np.argsort(-ratio[hit])]:
-                    name, col = self.meta[i][0], self.meta[i][1]
-                    alerts.append(dict(check=name, column=self._source(col), value=float(m[i]), usual=float(usual[i]),
-                                       ratio=float(min(ratio[i], 1e6))))
-                for a in alerts:
-                    if a["column"] != WHOLE_ROW and a["column"] not in suspects:
-                        suspects.append(a["column"])
-                if df is not None and detail is not None and len(hit):
-                    examples = self._examples(df, hit, ratio, *detail)
-        rep = Report(batch, status, n_rows, alerts, suspects, examples, dict(self.schema.skipped),
-                     len(self.histories.get(segment, [])), segment)
-        rep._entry = entry
-        if update == "always" or (update == "auto" and status != "alert"):
-            self._append(entry)
-        return rep
+            specs = self.checks.specs
+            increase_only = np.array([spec.increase_only for spec in specs])
+            entry.deviation = deviation_from(metrics, usual, increase_only)
+            if history.calibrated_batches >= self.min_history:
+                is_rate = np.array([spec.is_rate for spec in specs])
+                ratio = history.ratio_to_largest(entry.deviation, is_rate, rows_checked)
+                alerting = np.where(ratio > self.margin)[0]
+                alerting = alerting[np.argsort(-ratio[alerting])]  # largest ratio first
+                report.status = ALERT if len(alerting) else OK
+                report.alerts = [
+                    Alert(
+                        check=specs[i].name,
+                        column=self._source(specs[i].column),
+                        value=float(metrics[i]),
+                        usual=float(usual[i]),
+                        ratio=float(min(ratio[i], MAX_ALERT_RATIO)),
+                    )
+                    for i in alerting
+                ]
+                report.suspect_columns = _unique(
+                    alert.column for alert in report.alerts if alert.column != WHOLE_ROW
+                )
+                if rows is not None and scores is not None and len(alerting):
+                    report.examples = self._examples(rows, scores, alerting)
 
-    def _append(self, entry):
-        seg = entry["segment"]
-        self.histories.setdefault(seg, []).append(entry)
-        if entry["dev"] is not None:
-            self.runmax[seg] = np.maximum(self.runmax[seg], entry["dev"]) if seg in self.runmax else entry["dev"].copy()
-            self.n_valid[seg] = self.n_valid.get(seg, 0) + 1
-        keep = max(self.window, 60)                       # older batches only matter through runmax
-        if len(self.histories[seg]) > keep:
-            self.histories[seg] = self.histories[seg][-keep:]
+        if update == "always" or (update == "auto" and report.status != ALERT):
+            self._record(entry, segment)
+        return report
 
-    def accept(self, report):
+    def accept(self, report: Report) -> None:
         """Tell the monitor an alerting batch was fine after all, so it widens its tolerance."""
-        e = report._entry
-        if e is not None and all(h is not e for h in self.histories.get(e["segment"], [])):
-            self._append(e)
+        if report.history_entry is not None:
+            self._record(report.history_entry, report.segment)
+
+    def _record(self, entry: HistoryEntry, segment: str) -> None:
+        self.histories.setdefault(segment, SegmentHistory()).record(entry, self.window)
+
+    def _source(self, feature: str) -> str:
+        return self.schema.source_column.get(feature, feature)
+
+    def _examples(
+        self, rows: pd.DataFrame, scores: Scores, alerting: np.ndarray
+    ) -> dict[str, list[dict[str, Any]]]:
+        """The most suspicious rows for the first few alerting columns."""
+        examples: dict[str, list[dict[str, Any]]] = {}
+        relationship = scores.relationship_bits
+        for i in alerting:
+            spec = self.checks.specs[i]
+            if spec.column == WHOLE_ROW or len(examples) >= EXAMPLE_COLUMNS:
+                continue
+            source = self._source(spec.column)
+            if source in examples:
+                continue
+            j = self.columns.index(spec.column)
+            per_row = relationship[:, j] if "relationship" in spec.name else scores.excess[:, j]
+            worst = rows.iloc[np.argsort(-per_row)[:EXAMPLE_ROWS]]
+            others = [c for c in rows.columns if c != source and c not in self.schema.skipped]
+            shown = [source] + others[:EXAMPLE_FIELDS]
+            examples[source] = [{c: _plain(row[c]) for c in shown} for _, row in worst.iterrows()]
+        return examples
+
+    # ------------------------------------------------------------------ reading the monitor
+    @property
+    def columns(self) -> list[str]:
+        """The numeric features the model reads, in model order."""
+        return self.model.columns
 
     @property
-    def last_batch(self):
-        h = self.history
-        return h[-1]["batch"] if h else None
+    def history(self) -> list[HistoryEntry]:
+        """Clean batches recorded for the table as a whole."""
+        return self.histories.get(WHOLE_TABLE, SegmentHistory()).entries
 
-    def _source(self, feature):
-        return self.schema.origin.get(feature, feature)
+    @property
+    def batches_until_ready(self) -> int:
+        """Clean batches still needed before alerts switch on."""
+        calibrated = self.histories.get(WHOLE_TABLE, SegmentHistory()).calibrated_batches
+        return max(0, self.min_history - calibrated)
 
-    def _examples(self, df, hit, ratio, X, LLR, per_col=3, max_cols=2):
-        out = {}
-        for i in hit[np.argsort(-ratio[hit])]:
-            name, col = self.meta[i][0], self.meta[i][1]
-            if col == WHOLE_ROW or col not in self.cols or len(out) >= max_cols:
-                continue
-            src = self._source(col)
-            if src in out:
-                continue
-            j = self.cols.index(col)
-            score = LLR[:, j] if "relationship" in name else X[:, j]
-            rows = df.iloc[np.argsort(-score)[:per_col]]
-            show = [src] + [c for c in df.columns if c != src and c not in self.schema.skipped][:7]
-            out[src] = [{c: (None if pd.isna(r[c]) else (r[c].item() if hasattr(r[c], "item") else str(r[c]))) for c in show}
-                        for _, r in rows.iterrows()]
-        return out
+    # ------------------------------------------------------------------ saving and loading
+    SETTINGS = (
+        "margin",
+        "window",
+        "min_history",
+        "sample_rows",
+        "max_train_rows",
+        "max_categories",
+        "seed",
+    )
 
-    # ------------------------------------------------------------------ persistence
-    def save(self, target, key="monitor", history_only=False):
-        """Save to a folder path, a cloud URL (needs fsspec), or a store object.
-        The model is written once; the small history part is rewritten after every check."""
-        from .state import dump_model, dump_history
-        from .store import open_store
+    def model_bytes(self) -> bytes:
+        """Everything fixed at fit time."""
+        return state.pack(
+            state.MODEL,
+            {
+                "model_id": self.model_id,
+                "settings": {name: getattr(self, name) for name in self.SETTINGS},
+                "batch_col": self.batch_col,
+                "freq": self.freq,
+                "schema": self.schema.to_state(),
+                "model": self.model.to_state(),
+                "checks": self.checks.to_state(),
+                "table_config": None if self.table_config is None else asdict(self.table_config),
+            },
+        )
+
+    def history_bytes(self) -> bytes:
+        """What changes after each check."""
+        return state.pack(
+            state.HISTORY,
+            {
+                "model_id": self.model_id,
+                "histories": {seg: hist.to_state() for seg, hist in self.histories.items()},
+                "last_checked": self.last_checked,
+            },
+        )
+
+    @classmethod
+    def from_bytes(
+        cls, model_bytes: bytes, history_bytes: bytes | None = None, threads: int = 0
+    ) -> Monitor:
+        saved = state.unpack(model_bytes, state.MODEL)
+        monitor = cls(threads=threads, **saved["settings"])
+        monitor.model_id = saved["model_id"]
+        monitor.batch_col, monitor.freq = saved["batch_col"], saved["freq"]
+        monitor.schema = TableSchema.from_state(saved["schema"])
+        monitor.model = TableModel.from_state(saved["model"], threads)
+        monitor.checks = BatchChecks.from_state(saved["checks"])
+        if saved["table_config"] is not None:
+            monitor.table_config = TableConfig(**saved["table_config"])
+        if history_bytes is not None:
+            history = state.unpack(history_bytes, state.HISTORY)
+            if history["model_id"] != monitor.model_id:
+                raise state.StateError(
+                    "the saved history belongs to a different fit of the model. Fit the monitor "
+                    "again, or restore the model and history from the same save."
+                )
+            monitor.histories = {
+                seg: SegmentHistory.from_state(hist) for seg, hist in history["histories"].items()
+            }
+            monitor.last_checked = history["last_checked"]
+        return monitor
+
+    def save(self, target: str | Store, key: str = "monitor", history_only: bool = False) -> None:
+        """Save to a folder, a cloud URL (needs fsspec) or a store object.
+
+        The model is written once. The small history is rewritten after every check, so pass
+        history_only=True after checking.
+        """
         store = open_store(target)
         if not history_only:
-            store.put(f"{key}.model", dump_model(self))
-        store.put(f"{key}.history", dump_history(self))
+            store.put(f"{key}.model", self.model_bytes())
+        store.put(f"{key}.history", self.history_bytes())
 
-    @staticmethod
-    def load(target, key="monitor"):
-        from .state import load_monitor
-        from .store import open_store
+    @classmethod
+    def load(cls, target: str | Store, key: str = "monitor", threads: int = 0) -> Monitor:
         store = open_store(target)
-        model, history = store.get(f"{key}.model"), store.get(f"{key}.history")
-        if model is None:
+        model_bytes = store.get(f"{key}.model")
+        if model_bytes is None:
             raise FileNotFoundError(f"no saved monitor named {key!r} in {target!r}")
-        return load_monitor(model, history)
+        return cls.from_bytes(model_bytes, store.get(f"{key}.history"), threads)
+
+
+def _unique(items) -> list:
+    """Distinct items in first-seen order."""
+    return list(dict.fromkeys(items))
+
+
+def _plain(value: Any) -> Any:
+    """A cell value as a plain Python value, for reports and JSON."""
+    if pd.isna(value):
+        return None
+    return value.item() if hasattr(value, "item") else str(value)
