@@ -38,10 +38,15 @@ expected in each. To reproduce it:
 - [Design](#design)
 - [Development](#development)
 - [Files](#files)
+- [License](#license)
 
 ## Install
 
-    pip install .            # from this folder; needs Python 3.10+, numpy, pandas, lightgbm, pyarrow
+    pip install git+https://github.com/zahmed333/morello
+
+Or from a clone of this repository:
+
+    pip install .            # needs Python 3.10+, numpy, pandas, lightgbm, pyarrow
 
 ## Use from Python
 
@@ -259,3 +264,8 @@ run fails part-way. In short:
     assets/brand/        logo, colours, type, slide template (see BRAND.md)
     site/                landing page, published at zulnoraina.com/morello/
     wrangler.jsonc       Cloudflare settings that publish site/
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE). The fonts in `assets/brand/fonts/`
+are under the SIL Open Font License (`assets/brand/fonts/OFL.txt`).

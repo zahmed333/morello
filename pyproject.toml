@@ -8,7 +8,13 @@ version = "0.7.0"
 description = "Flag batches of a table whose rows stop making sense together"
 readme = "README.md"
 requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+authors = [{name = "Zulnorain Ahmed"}]
 dependencies = ["numpy", "pandas>=2.0", "lightgbm>=4.0", "pyarrow"]
+
+[project.urls]
+Homepage = "https://zulnoraina.com/morello/"
+Source = "https://github.com/zahmed333/morello"
 
 [project.scripts]
 morello = "morello.cli:main"

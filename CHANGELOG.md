@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The repository is public, under the Apache License 2.0.
+
 ## 0.7.0
 
 Added

@@ -89,6 +89,7 @@
   section { padding-block: var(--space-16); }
   .section-head { display: grid; gap: var(--space-4); margin-bottom: var(--space-10); }
   .section-head p { color: var(--muted); font-size: 1.1rem; }
+    .section-head p code { font-family: var(--font-mono); font-size: 0.92em; overflow-wrap: anywhere; }
   .band { background: var(--tint); }
 
   figure { margin: 0; }
@@ -268,7 +269,7 @@
       <div class="section-head">
         <p class="label">Usage</p>
         <h2>Point it at a table from the command line, Python or a warehouse.</h2>
-        <p>Morello is in private pre-release, so the repository is not public yet. This is what using it looks like.</p>
+        <p>Morello is open source under the Apache 2.0 license. Install it with <code>pip install git+https://github.com/zahmed333/morello</code>.</p>
       </div>
       <div class="codes">
         <div class="code wide">
@@ -367,7 +368,7 @@ reports = check_table(conn, "s3://bucket/morello", table="analytics.orders",
 
 <footer>
   <div class="wrap">
-    <span>Morello 0.7, private pre-release. <a href="https://github.com/zahmed333/morello">Source on GitHub</a> (private for now) · <a href="https://zulnoraina.com/">zulnoraina.com</a></span>
+    <span>Morello 0.7, open source under Apache 2.0. <a href="https://github.com/zahmed333/morello">Source on GitHub</a> · <a href="https://zulnoraina.com/">zulnoraina.com</a></span>
     <span>Fonts: Space Grotesk, Inter and JetBrains Mono, under the SIL Open Font License.</span>
   </div>
 </footer>
