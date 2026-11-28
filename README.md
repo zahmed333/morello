@@ -1,4 +1,4 @@
-<p><img src="assets/brand/banner.svg" alt="Morello. Know when your data stops making sense." width="100%"></p>
+<p><img src="https://raw.githubusercontent.com/zahmed333/morello/main/assets/brand/banner.svg" alt="Morello. Know when your data stops making sense." width="100%"></p>
 
 # Morello
 
@@ -11,7 +11,7 @@ per-column checks (nulls, unexpected values, distribution shift, duplicates).
 It needs no rules. You give it a history of the table that you believe is clean, and then each
 new batch.
 
-<p><img src="assets/brand/sample-report.svg" alt="Terminal session: morello fit on 60 clean days of orders, then morello check on two new days. The first day is OK. The second day alerts with one finding: total stopped fitting unit_price and quantity in 4.2% of rows. Three example rows follow, each with the value the model expected." width="100%"></p>
+<p><img src="https://raw.githubusercontent.com/zahmed333/morello/main/assets/brand/sample-report.svg" alt="Terminal session: morello fit on 60 clean days of orders, then morello check on two new days. The first day is OK. The second day alerts with one finding: total stopped fitting unit_price and quantity in 4.2% of rows. Three example rows follow, each with the value the model expected." width="100%"></p>
 
 The session above is real output on a synthetic orders table. On the second new day, 5% of
 orders carry another order's product, category and unit price. Every column of those rows looks
@@ -80,7 +80,7 @@ reports = check_table(
 
 The sample is taken by a query inside the warehouse, so table size does not matter. `conn` can be
 DuckDB, Spark, Snowpark, a SQLAlchemy URL or a DB-API connection. Adapters for Spark and Databricks,
-Snowflake, dbt, Airflow, Dagster and Scala jobs are described in [`docs/integrations.md`](docs/integrations.md), together with
+Snowflake, dbt, Airflow, Dagster and Scala jobs are described in [`docs/integrations.md`](https://github.com/zahmed333/morello/blob/main/docs/integrations.md), together with
 which of them have actually been run.
 
 ## Try it on your own history first
@@ -157,7 +157,7 @@ environment variable turns them off, and `--color always` keeps them when output
 | Scala gate on the results table | compiled with Scala 2.13 and run with spark-submit on Spark 4.3 |
 | Scala API for the model | not built; scoring runs in Python |
 
-Setup for each platform is in [`docs/integrations.md`](docs/integrations.md).
+Setup for each platform is in [`docs/integrations.md`](https://github.com/zahmed333/morello/blob/main/docs/integrations.md).
 
 ## Evidence so far
 
@@ -176,7 +176,7 @@ them on every day at every severity, against 0.06 for standard checks. NannyML's
 reconstruction, run on the same batches, detected 0.19 of failures on taxi and 0.34 on EMS.
 
 Morello has not been tested on real incidents or against commercial tools, and it was weak on a
-table with few rows per batch. The full tables and method are in [`docs/results.md`](docs/results.md).
+table with few rows per batch. The full tables and method are in [`docs/results.md`](https://github.com/zahmed333/morello/blob/main/docs/results.md).
 
 ## How it works
 
@@ -232,11 +232,11 @@ much each check normally moves. Alerts switch on after 14 calibrated batches
   databases.
 - Saved monitors are compressed JSON (no pickle), split into a model part and a small history part.
 - One job at a time should check a given table. Saved state is not locked.
-- Evidence so far is from simulated failures on three public datasets. See [`docs/results.md`](docs/results.md).
+- Evidence so far is from simulated failures on three public datasets. See [`docs/results.md`](https://github.com/zahmed333/morello/blob/main/docs/results.md).
 
 ## Design
 
-[`docs/design.md`](docs/design.md) explains how the code is organized and what happens when a
+[`docs/design.md`](https://github.com/zahmed333/morello/blob/main/docs/design.md) explains how the code is organized and what happens when a
 run fails part-way. In short:
 
 - A run can be repeated. The history keeps one entry per batch, and a run that dies starts
@@ -267,5 +267,5 @@ run fails part-way. In short:
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE). The fonts in `assets/brand/fonts/`
+Apache License 2.0. See [LICENSE](https://github.com/zahmed333/morello/blob/main/LICENSE) and [NOTICE](https://github.com/zahmed333/morello/blob/main/NOTICE). The fonts in `assets/brand/fonts/`
 are under the SIL Open Font License (`assets/brand/fonts/OFL.txt`).
